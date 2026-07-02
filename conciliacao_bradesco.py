@@ -19,333 +19,184 @@ Estrutura de colunas (A até O):
   N) Pós-Fechamento    - Entrada manual
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
-
-import streamlit as st
+import calendar
+from datetime import date
 import pandas as pd
-import numpy as np
-from io import BytesIO
+import streamlit as st
+
+st.set_page_config(page_title="Conciliação Bradesco", layout="wide")
+
+MESES = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
+
+COLUNAS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"]
+COLUNAS_EDITAVEIS = ["A", "B", "C", "D", "E", "F"]
 
 
-# ---------------------------------------------------------------------------
-# Configuração da página
-# ---------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Sistema de Conciliação",
-    page_icon="💳",
-    layout="wide",
-)
-
-st.title("💳 Sistema de Conciliação")
-st.subheader("Edição manual das colunas A a F")
+def chave_periodo(ano: int, mes: int) -> str:
+    return f"{ano:04d}-{mes:02d}"
 
 
-# ---------------------------------------------------------------------------
-# Funções utilitárias para tratamento seguro de valores numéricos
-# ---------------------------------------------------------------------------
-def to_number(value):
-    """Converte um valor qualquer para número de forma segura."""
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    if isinstance(value, str):
-        value = value.strip()
-        if value == "":
-            return 0.0
-        # Remove separadores de milhar e troca vírgula decimal por ponto
-        value = value.replace(".", "").replace(",", ".")
-        try:
-            return float(value)
-        except ValueError:
-            return 0.0
-    return 0.0
+def proximo_periodo(ano: int, mes: int) -> tuple[int, int]:
+    if mes == 12:
+        return ano + 1, 1
+    return ano, mes + 1
 
 
-def safe_format_currency(value):
-    """Formata um valor numérico como moeda brasileira de forma segura."""
-    number = to_number(value)
-    return f"R$ {number:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def criar_dataframe_vazio() -> pd.DataFrame:
+    return pd.DataFrame(columns=COLUNAS)
 
 
-def safe_format_percent(value):
-    """Formata um valor numérico como percentual de forma segura."""
-    number = to_number(value)
-    return f"{number:.2f}%"
+def obter_periodo_atual(ano: int, mes: int) -> pd.DataFrame:
+    chave = chave_periodo(ano, mes)
+    if "historico" not in st.session_state:
+        st.session_state.historico = {}
+    if chave not in st.session_state.historico:
+        st.session_state.historico[chave] = criar_dataframe_vazio()
+    return st.session_state.historico[chave]
 
 
-# ---------------------------------------------------------------------------
-# Dados de exemplo (simulação de conciliação)
-# ---------------------------------------------------------------------------
-@st.cache_data
-def load_sample_data() -> pd.DataFrame:
-    data = {
-        "A_Cartao": ["1234****5678", "2345****6789", "3456****7890", "4567****8901"],
-        "B_Resumo": ["Resumo 001", "Resumo 002", "Resumo 003", "Resumo 004"],
-        "C_Titular": ["João da Silva", "Maria Oliveira", "Carlos Santos", "Ana Souza"],
-        "D_CPF": ["123.456.789-00", "987.654.321-00", "456.789.123-00", "321.654.987-00"],
-        "E_Localidade": ["São Paulo / SP", "Rio de Janeiro / RJ", "Belo Horizonte / MG", "Curitiba / PR"],
-        "F_Limite": [10000.00, 15000.00, 8000.00, 12000.00],
-        "G_Valores": [2500.00, 3200.00, 1800.00, 4500.00],
-        "H_Pagamentos": [2300.00, 3100.00, 1700.00, 4400.00],
-        "I_Saldo": [200.00, 100.00, 100.00, 100.00],
-        "J_PercentualUsado": [25.00, 21.33, 22.50, 37.50],
-        "K_Diferenca": [0.00, 0.00, 0.00, 0.00],
-        "L_Status": ["Conciliado", "Conciliado", "Conciliado", "Conciliado"],
-        "M_TotalDevido": [2500.00, 3200.00, 1800.00, 4500.00],
-        "N_Observacoes": ["", "", "", ""],
-        "O_IndiceConciliacao": [100.00, 100.00, 100.00, 100.00],
-    }
-    return pd.DataFrame(data)
-
-
-# ---------------------------------------------------------------------------
-# Inicialização do estado da sessão
-# ---------------------------------------------------------------------------
-if "df_conciliacao" not in st.session_state:
-    st.session_state.df_conciliacao = load_sample_data().copy()
-
-if "edicoes_manuais" not in st.session_state:
-    st.session_state.edicoes_manuais = {}
-
-
-def recalcular_colunas(df: pd.DataFrame) -> pd.DataFrame:
-    """Recalcula as colunas de cálculo (J, K, L, M, O) de forma segura."""
+def recalcular_automaticos(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    for col in ["J", "K", "L", "M", "N", "O"]:
+        if col not in df.columns:
+            df[col] = 0.0
 
-    # M_TotalDevido = G_Valores - H_Pagamentos
-    df["M_TotalDevido"] = df.apply(
-        lambda row: to_number(row["G_Valores"]) - to_number(row["H_Pagamentos"]),
-        axis=1,
-    )
+    def to_num(valor):
+        if pd.isna(valor):
+            return 0.0
+        try:
+            return float(str(valor).replace(".", "").replace(",", "."))
+        except (ValueError, TypeError):
+            return 0.0
 
-    # J_PercentualUsado = (G_Valores / F_Limite) * 100
-    df["J_PercentualUsado"] = df.apply(
-        lambda row: (
-            (to_number(row["G_Valores"]) / to_number(row["F_Limite"]) * 100)
-            if to_number(row["F_Limite"]) != 0
-            else 0.0
-        ),
-        axis=1,
-    )
+    for idx in df.index:
+        a = to_num(df.at[idx, "A"])
+        b = to_num(df.at[idx, "B"])
+        c = to_num(df.at[idx, "C"])
+        d = to_num(df.at[idx, "D"])
+        e = to_num(df.at[idx, "E"])
+        f = to_num(df.at[idx, "F"])
+        i = to_num(df.at[idx, "I"])
 
-    # K_Diferenca = G_Valores - H_Pagamentos - I_Saldo
-    df["K_Diferenca"] = df.apply(
-        lambda row: (
-            to_number(row["G_Valores"])
-            - to_number(row["H_Pagamentos"])
-            - to_number(row["I_Saldo"])
-        ),
-        axis=1,
-    )
-
-    # L_Status baseado na diferença
-    df["L_Status"] = df["K_Diferenca"].apply(
-        lambda diff: "Conciliado" if abs(to_number(diff)) < 0.01 else "Divergente"
-    )
-
-    # O_IndiceConciliacao = (H_Pagamentos / G_Valores) * 100
-    df["O_IndiceConciliacao"] = df.apply(
-        lambda row: (
-            (to_number(row["H_Pagamentos"]) / to_number(row["G_Valores"]) * 100)
-            if to_number(row["G_Valores"]) != 0
-            else 0.0
-        ),
-        axis=1,
-    )
+        df.at[idx, "J"] = a + b
+        df.at[idx, "K"] = c + d
+        df.at[idx, "L"] = e + f
+        df.at[idx, "M"] = df.at[idx, "J"] - df.at[idx, "K"]
+        df.at[idx, "N"] = df.at[idx, "M"] + i
+        df.at[idx, "O"] = df.at[idx, "N"] + df.at[idx, "L"]
 
     return df
 
 
-# ---------------------------------------------------------------------------
-# Exibição do data_editor
-# ---------------------------------------------------------------------------
-st.markdown("### Tabela de Conciliação")
-st.info(
-    "ℹ️ As colunas **A a F** (Cartão, Resumo, Titular, CPF, Localidade, Limite) "
-    "são editáveis. As colunas de cálculo **J, K, L, M, O** são somente leitura."
-)
+def fechar_mes(ano: int, mes: int) -> tuple[int, int]:
+    df_atual = obter_periodo_atual(ano, mes)
+    df_atual = recalcular_automaticos(df_atual)
+    st.session_state.historico[chave_periodo(ano, mes)] = df_atual
 
-# Configuração das colunas: A a F editáveis, cálculo (J, K, L, M, O) desabilitadas
-column_config = {
-    "A_Cartao": st.column_config.TextColumn(
-        "A - Cartão",
-        help="Número do cartão (editável)",
-    ),
-    "B_Resumo": st.column_config.TextColumn(
-        "B - Resumo",
-        help="Resumo da transação (editável)",
-    ),
-    "C_Titular": st.column_config.TextColumn(
-        "C - Titular",
-        help="Nome do titular (editável)",
-    ),
-    "D_CPF": st.column_config.TextColumn(
-        "D - CPF",
-        help="CPF do titular (editável)",
-    ),
-    "E_Localidade": st.column_config.TextColumn(
-        "E - Localidade",
-        help="Localidade do titular (editável)",
-    ),
-    "F_Limite": st.column_config.NumberColumn(
-        "F - Limite",
-        help="Limite do cartão (editável)",
-        format="R$ %.2f",
-        step=0.01,
-    ),
-    "G_Valores": st.column_config.NumberColumn(
-        "G - Valores",
-        format="R$ %.2f",
-        step=0.01,
-    ),
-    "H_Pagamentos": st.column_config.NumberColumn(
-        "H - Pagamentos",
-        format="R$ %.2f",
-        step=0.01,
-    ),
-    "I_Saldo": st.column_config.NumberColumn(
-        "I - Saldo",
-        format="R$ %.2f",
-        step=0.01,
-    ),
-    "J_PercentualUsado": st.column_config.NumberColumn(
-        "J - % Usado",
-        help="Percentual do limite usado (somente leitura)",
-        format="%.2f%%",
-        disabled=True,
-    ),
-    "K_Diferenca": st.column_config.NumberColumn(
-        "K - Diferença",
-        help="Diferença de conciliação (somente leitura)",
-        format="R$ %.2f",
-        disabled=True,
-    ),
-    "L_Status": st.column_config.TextColumn(
-        "L - Status",
-        help="Status da conciliação (somente leitura)",
-        disabled=True,
-    ),
-    "M_TotalDevido": st.column_config.NumberColumn(
-        "M - Total Devido",
-        help="Total devido (somente leitura)",
-        format="R$ %.2f",
-        disabled=True,
-    ),
-    "N_Observacoes": st.column_config.TextColumn(
-        "N - Observações",
-        help="Observações adicionais (editável)",
-    ),
-    "O_IndiceConciliacao": st.column_config.NumberColumn(
-        "O - Índice Conciliação",
-        help="Índice de conciliação (somente leitura)",
-        format="%.2f%%",
-        disabled=True,
-    ),
-}
+    prox_ano, prox_mes = proximo_periodo(ano, mes)
+    df_prox = obter_periodo_atual(prox_ano, prox_mes)
 
-# Lista de colunas de cálculo que devem permanecer desabilitadas
-colunas_calculo_disabled = [
-    "J_PercentualUsado",
-    "K_Diferenca",
-    "L_Status",
-    "M_TotalDevido",
-    "O_IndiceConciliacao",
-]
+    saldo_transportar = 0.0
+    if not df_atual.empty and "O" in df_atual.columns:
+        saldo_transportar = float(pd.to_numeric(df_atual["O"], errors="coerce").fillna(0).sum())
 
-# Renderiza o data_editor
-# As colunas A_Cartao, B_Resumo, C_Titular, D_CPF, E_Localidade e F_Limite
-# NÃO possuem disabled=True, portanto são editáveis.
-df_editado = st.data_editor(
-    st.session_state.df_conciliacao,
-    column_config=column_config,
-    disabled=colunas_calculo_disabled,
-    num_rows="dynamic",
-    use_container_width=True,
-    key="data_editor_conciliacao",
-    hide_index=True,
-)
+    nova_linha = {col: "" for col in COLUNAS}
+    nova_linha["I"] = saldo_transportar
+    df_prox = pd.concat([df_prox, pd.DataFrame([nova_linha])], ignore_index=True)
+    df_prox = recalcular_automaticos(df_prox)
+    st.session_state.historico[chave_periodo(prox_ano, prox_mes)] = df_prox
 
-# ---------------------------------------------------------------------------
-# Processamento das edições
-# ---------------------------------------------------------------------------
-if df_editado is not None and not df_editado.equals(st.session_state.df_conciliacao):
-    # Atualiza o DataFrame com as edições manuais das colunas A a F
-    st.session_state.df_conciliacao = df_editado.copy()
+    return prox_ano, prox_mes, saldo_transportar
 
-    # Recalcula as colunas de cálculo de forma segura
-    st.session_state.df_conciliacao = recalcular_colunas(
-        st.session_state.df_conciliacao
-    )
 
-    # Garante que os valores numéricos estejam corretamente tipados
-    colunas_numericas = [
-        "F_Limite",
-        "G_Valores",
-        "H_Pagamentos",
-        "I_Saldo",
-        "J_PercentualUsado",
-        "K_Diferenca",
-        "M_TotalDevido",
-        "O_IndiceConciliacao",
-    ]
-    for col in colunas_numericas:
-        st.session_state.df_conciliacao[col] = (
-            st.session_state.df_conciliacao[col].apply(to_number)
+def main() -> None:
+    st.title("Conciliação Bradesco")
+
+    with st.sidebar:
+        st.header("Controle de Período")
+        anos_disponiveis = list(range(2024, 2031))
+        ano = st.selectbox("Ano", anos_disponiveis, index=anos_disponiveis.index(2026))
+        mes = st.selectbox("Mês", list(MESES.keys()),
+                           format_func=lambda m: MESES[m],
+                           index=6)
+        st.divider()
+        st.markdown(f"**Período ativo:** {MESES[mes]} {ano}")
+        st.caption(f"Chave: {chave_periodo(ano, mes)}")
+
+    df_periodo = obter_periodo_atual(ano, mes)
+
+    st.subheader(f"Lançamentos - {MESES[mes]} {ano}")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.data_editor(
+            df_periodo,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"editor_{chave_periodo(ano, mes)}",
+            column_config={
+                col: st.column_config.NumberColumn(format="%.2f")
+                for col in COLUNAS
+            },
+            disabled=[col for col in COLUNAS if col not in COLUNAS_EDITAVEIS],
         )
+    with col2:
+        st.markdown("**Resumo**")
+        if not df_periodo.empty:
+            df_calc = recalcular_automaticos(df_periodo)
+            st.metric("Total Coluna O", f"{pd.to_numeric(df_calc['O'], errors='coerce').fillna(0).sum():.2f}")
+            st.metric("Total Coluna I", f"{pd.to_numeric(df_calc['I'], errors='coerce').fillna(0).sum():.2f}")
+        else:
+            st.info("Sem lançamentos no período.")
 
-    st.success("✅ Edições manuais aplicadas e colunas de cálculo recalculadas!")
-    st.rerun()
+    st.divider()
+    st.subheader("Ações do Período")
+
+    if st.button("Salvar lançamentos do mês"):
+        editor_state = st.session_state.get(f"editor_{chave_periodo(ano, mes)}", None)
+        if editor_state is not None and "edited_rows" in editor_state:
+            df_editado = df_periodo.copy()
+            for row_idx, changes in editor_state["edited_rows"].items():
+                real_idx = list(df_editado.index)[row_idx] if row_idx < len(df_editado.index) else row_idx
+                for col, valor in changes.items():
+                    df_editado.at[real_idx, col] = valor
+            df_editado = recalcular_automaticos(df_editado)
+            st.session_state.historico[chave_periodo(ano, mes)] = df_editado
+            st.success("Lançamentos salvos e colunas J a O recalculadas.")
+        else:
+            df_editado = recalcular_automaticos(df_periodo)
+            st.session_state.historico[chave_periodo(ano, mes)] = df_editado
+            st.success("Nenhuma alteração manual detectada. Cálculos atualizados.")
+        st.rerun()
+
+    if st.button("Fechar Mês"):
+        prox_ano, prox_mes, saldo = fechar_mes(ano, mes)
+        st.success(
+            f"Mês fechado! Saldo de {saldo:.2f} transportado da Coluna O "
+            f"para a Coluna I de {MESES[prox_mes]} {prox_ano} "
+            f"({chave_periodo(prox_ano, prox_mes)})."
+        )
+        st.info("Selecione o próximo mês na barra lateral para visualizar o saldo transportado.")
+
+    st.divider()
+    with st.expander("Períodos armazenados em memória", expanded=False):
+        if st.session_state.get("historico"):
+            resumo = []
+            for chave, df in st.session_state.historico.items():
+                resumo.append({
+                    "Período": chave,
+                    "Linhas": len(df),
+                    "Total O": float(pd.to_numeric(df.get("O", []), errors="coerce").fillna(0).sum())
+                    if not df.empty else 0.0,
+                })
+            st.dataframe(pd.DataFrame(resumo), use_container_width=True)
+        else:
+            st.write("Nenhum período armazenado ainda.")
 
 
-# ---------------------------------------------------------------------------
-# Resumo e exportação
-# ---------------------------------------------------------------------------
-st.markdown("---")
-st.markdown("### 📊 Resumo da Conciliação")
-
-df_atual = st.session_state.df_conciliacao
-
-col1, col2, col3, col4 = st.columns(4)
-
-total_limite = df_atual["F_Limite"].apply(to_number).sum()
-total_valores = df_atual["G_Valores"].apply(to_number).sum()
-total_pagamentos = df_atual["H_Pagamentos"].apply(to_number).sum()
-total_divergencias = (
-    df_atual["K_Diferenca"].apply(to_number).abs().apply(lambda x: x if x >= 0.01 else 0).sum()
-)
-
-col1.metric("Total Limite", safe_format_currency(total_limite))
-col2.metric("Total Valores", safe_format_currency(total_valores))
-col3.metric("Total Pagamentos", safe_format_currency(total_pagamentos))
-col4.metric("Total Divergências", safe_format_currency(total_divergencias))
-
-
-# ---------------------------------------------------------------------------
-# Exportação para Excel
-# ---------------------------------------------------------------------------
-st.markdown("### 📥 Exportar")
-
-def exportar_excel(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Conciliação")
-    return output.getvalue()
-
-
-st.download_button(
-    label="⬇️ Baixar Excel",
-    data=exportar_excel(df_atual),
-    file_name="conciliacao.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-if st.button("🔄 Recalcular Tudo"):
-    st.session_state.df_conciliacao = recalcular_colunas(df_atual)
-    st.success("✅ Recálculo concluído!")
-    st.rerun()
-
-if st.button("🗑️ Restaurar Dados de Exemplo"):
-    st.session_state.df_conciliacao = load_sample_data().copy()
-    st.cache_data.clear()
-    st.success("✅ Dados restaurados!")
-    st.rerun()
+if __name__ == "__main__":
+    main()
