@@ -20,141 +20,332 @@ Estrutura de colunas (A até O):
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
 
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 from io import BytesIO
 
-# Colunas financeiras que devem ser tratadas com seguranca numerica
-FINANCIAL_COLUMNS = ['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']
+
+# ---------------------------------------------------------------------------
+# Configuração da página
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Sistema de Conciliação",
+    page_icon="💳",
+    layout="wide",
+)
+
+st.title("💳 Sistema de Conciliação")
+st.subheader("Edição manual das colunas A a F")
 
 
-def safe_numeric(df: pd.DataFrame, columns=FINANCIAL_COLUMNS) -> pd.DataFrame:
-    """Converte colunas financeiras para numerico de forma segura.
-
-    Usa pd.to_numeric com errors='coerce' e fillna(0) para evitar
-    ValueError durante somas ou formatacoes de st.metric.
-    """
-    df = df.copy()
-    for col in columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    return df
-
-
-def format_currency(value: float) -> str:
-    """Formata um valor numerico como moeda brasileira de forma segura."""
-    try:
-        return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except (TypeError, ValueError):
-        return "R$ 0,00"
-
-
-def load_data(uploaded_file) -> pd.DataFrame:
-    """Carrega um arquivo Excel/CSV e aplica a conversao numerica segura."""
-    if uploaded_file is None:
-        return pd.DataFrame()
-
-    if uploaded_file.name.lower().endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
-    df = safe_numeric(df)
-    return df
+# ---------------------------------------------------------------------------
+# Funções utilitárias para tratamento seguro de valores numéricos
+# ---------------------------------------------------------------------------
+def to_number(value):
+    """Converte um valor qualquer para número de forma segura."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return 0.0
+        # Remove separadores de milhar e troca vírgula decimal por ponto
+        value = value.replace(".", "").replace(",", ".")
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
-def calculate_reconciliation(df: pd.DataFrame) -> dict:
-    """Realiza os calculos de conciliacao usando colunas financeiras tratadas."""
-    df = safe_numeric(df)
+def safe_format_currency(value):
+    """Formata um valor numérico como moeda brasileira de forma segura."""
+    number = to_number(value)
+    return f"R$ {number:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    totals = {}
-    for col in FINANCIAL_COLUMNS:
-        if col in df.columns:
-            totals[col] = float(df[col].sum())
-        else:
-            totals[col] = 0.0
 
-    total_entradas = float(df['F'].sum() + df['H'].sum() + df['J'].sum() + df['L'].sum() + df['N'].sum()) \
-        if all(c in df.columns for c in ['F', 'H', 'J', 'L', 'N']) else 0.0
+def safe_format_percent(value):
+    """Formata um valor numérico como percentual de forma segura."""
+    number = to_number(value)
+    return f"{number:.2f}%"
 
-    total_saidas = float(df['G'].sum() + df['I'].sum() + df['K'].sum() + df['M'].sum() + df['O'].sum()) \
-        if all(c in df.columns for c in ['G', 'I', 'K', 'M', 'O']) else 0.0
 
-    saldo_conciliado = total_entradas - total_saidas
-
-    return {
-        'totals': totals,
-        'total_entradas': total_entradas,
-        'total_saidas': total_saidas,
-        'saldo_conciliado': saldo_conciliado,
+# ---------------------------------------------------------------------------
+# Dados de exemplo (simulação de conciliação)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def load_sample_data() -> pd.DataFrame:
+    data = {
+        "A_Cartao": ["1234****5678", "2345****6789", "3456****7890", "4567****8901"],
+        "B_Resumo": ["Resumo 001", "Resumo 002", "Resumo 003", "Resumo 004"],
+        "C_Titular": ["João da Silva", "Maria Oliveira", "Carlos Santos", "Ana Souza"],
+        "D_CPF": ["123.456.789-00", "987.654.321-00", "456.789.123-00", "321.654.987-00"],
+        "E_Localidade": ["São Paulo / SP", "Rio de Janeiro / RJ", "Belo Horizonte / MG", "Curitiba / PR"],
+        "F_Limite": [10000.00, 15000.00, 8000.00, 12000.00],
+        "G_Valores": [2500.00, 3200.00, 1800.00, 4500.00],
+        "H_Pagamentos": [2300.00, 3100.00, 1700.00, 4400.00],
+        "I_Saldo": [200.00, 100.00, 100.00, 100.00],
+        "J_PercentualUsado": [25.00, 21.33, 22.50, 37.50],
+        "K_Diferenca": [0.00, 0.00, 0.00, 0.00],
+        "L_Status": ["Conciliado", "Conciliado", "Conciliado", "Conciliado"],
+        "M_TotalDevido": [2500.00, 3200.00, 1800.00, 4500.00],
+        "N_Observacoes": ["", "", "", ""],
+        "O_IndiceConciliacao": [100.00, 100.00, 100.00, 100.00],
     }
+    return pd.DataFrame(data)
 
 
-def render_dashboard(df: pd.DataFrame, results: dict) -> None:
-    """Renderiza o Dashboard com metricas seguras contra erros de conversao."""
-    st.subheader("Dashboard de Conciliacao")
+# ---------------------------------------------------------------------------
+# Inicialização do estado da sessão
+# ---------------------------------------------------------------------------
+if "df_conciliacao" not in st.session_state:
+    st.session_state.df_conciliacao = load_sample_data().copy()
 
-    df = safe_numeric(df)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(label="Total de Entradas", value=format_currency(results['total_entradas']))
-    with col2:
-        st.metric(label="Total de Saidas", value=format_currency(results['total_saidas']))
-    with col3:
-        st.metric(label="Saldo Conciliado", value=format_currency(results['saldo_conciliado']))
-
-    st.markdown("### Detalhamento por Coluna Financeira")
-    metric_cols = st.columns(len(FINANCIAL_COLUMNS))
-    for idx, col in enumerate(FINANCIAL_COLUMNS):
-        with metric_cols[idx]:
-            value = results['totals'].get(col, 0.0)
-            st.metric(label=f"Coluna {col}", value=format_currency(value))
-
-    st.markdown("### Dados Conciliados")
-    st.dataframe(df, use_container_width=True)
+if "edicoes_manuais" not in st.session_state:
+    st.session_state.edicoes_manuais = {}
 
 
-def export_results(df: pd.DataFrame) -> BytesIO:
-    """Exporta os dados conciliados para um arquivo Excel em memoria."""
-    df = safe_numeric(df)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Conciliacao')
-    output.seek(0)
-    return output
+def recalcular_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    """Recalcula as colunas de cálculo (J, K, L, M, O) de forma segura."""
+    df = df.copy()
 
-
-def main() -> None:
-    st.title("Sistema de Conciliacao Financeira")
-
-    uploaded_file = st.file_uploader(
-        "Selecione o arquivo de conciliacao (Excel ou CSV)",
-        type=['xlsx', 'xls', 'csv']
+    # M_TotalDevido = G_Valores - H_Pagamentos
+    df["M_TotalDevido"] = df.apply(
+        lambda row: to_number(row["G_Valores"]) - to_number(row["H_Pagamentos"]),
+        axis=1,
     )
 
-    if uploaded_file is not None:
-        df = load_data(uploaded_file)
+    # J_PercentualUsado = (G_Valores / F_Limite) * 100
+    df["J_PercentualUsado"] = df.apply(
+        lambda row: (
+            (to_number(row["G_Valores"]) / to_number(row["F_Limite"]) * 100)
+            if to_number(row["F_Limite"]) != 0
+            else 0.0
+        ),
+        axis=1,
+    )
 
-        if df.empty:
-            st.warning("Nenhum dado valido encontrado no arquivo.")
-            return
+    # K_Diferenca = G_Valores - H_Pagamentos - I_Saldo
+    df["K_Diferenca"] = df.apply(
+        lambda row: (
+            to_number(row["G_Valores"])
+            - to_number(row["H_Pagamentos"])
+            - to_number(row["I_Saldo"])
+        ),
+        axis=1,
+    )
 
-        df = safe_numeric(df)
-        results = calculate_reconciliation(df)
-        render_dashboard(df, results)
+    # L_Status baseado na diferença
+    df["L_Status"] = df["K_Diferenca"].apply(
+        lambda diff: "Conciliado" if abs(to_number(diff)) < 0.01 else "Divergente"
+    )
 
-        st.markdown("### Exportar Resultados")
-        excel_data = export_results(df)
-        st.download_button(
-            label="Baixar Conciliacao (Excel)",
-            data=excel_data,
-            file_name='conciliacao_resultado.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    # O_IndiceConciliacao = (H_Pagamentos / G_Valores) * 100
+    df["O_IndiceConciliacao"] = df.apply(
+        lambda row: (
+            (to_number(row["H_Pagamentos"]) / to_number(row["G_Valores"]) * 100)
+            if to_number(row["G_Valores"]) != 0
+            else 0.0
+        ),
+        axis=1,
+    )
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Exibição do data_editor
+# ---------------------------------------------------------------------------
+st.markdown("### Tabela de Conciliação")
+st.info(
+    "ℹ️ As colunas **A a F** (Cartão, Resumo, Titular, CPF, Localidade, Limite) "
+    "são editáveis. As colunas de cálculo **J, K, L, M, O** são somente leitura."
+)
+
+# Configuração das colunas: A a F editáveis, cálculo (J, K, L, M, O) desabilitadas
+column_config = {
+    "A_Cartao": st.column_config.TextColumn(
+        "A - Cartão",
+        help="Número do cartão (editável)",
+    ),
+    "B_Resumo": st.column_config.TextColumn(
+        "B - Resumo",
+        help="Resumo da transação (editável)",
+    ),
+    "C_Titular": st.column_config.TextColumn(
+        "C - Titular",
+        help="Nome do titular (editável)",
+    ),
+    "D_CPF": st.column_config.TextColumn(
+        "D - CPF",
+        help="CPF do titular (editável)",
+    ),
+    "E_Localidade": st.column_config.TextColumn(
+        "E - Localidade",
+        help="Localidade do titular (editável)",
+    ),
+    "F_Limite": st.column_config.NumberColumn(
+        "F - Limite",
+        help="Limite do cartão (editável)",
+        format="R$ %.2f",
+        step=0.01,
+    ),
+    "G_Valores": st.column_config.NumberColumn(
+        "G - Valores",
+        format="R$ %.2f",
+        step=0.01,
+    ),
+    "H_Pagamentos": st.column_config.NumberColumn(
+        "H - Pagamentos",
+        format="R$ %.2f",
+        step=0.01,
+    ),
+    "I_Saldo": st.column_config.NumberColumn(
+        "I - Saldo",
+        format="R$ %.2f",
+        step=0.01,
+    ),
+    "J_PercentualUsado": st.column_config.NumberColumn(
+        "J - % Usado",
+        help="Percentual do limite usado (somente leitura)",
+        format="%.2f%%",
+        disabled=True,
+    ),
+    "K_Diferenca": st.column_config.NumberColumn(
+        "K - Diferença",
+        help="Diferença de conciliação (somente leitura)",
+        format="R$ %.2f",
+        disabled=True,
+    ),
+    "L_Status": st.column_config.TextColumn(
+        "L - Status",
+        help="Status da conciliação (somente leitura)",
+        disabled=True,
+    ),
+    "M_TotalDevido": st.column_config.NumberColumn(
+        "M - Total Devido",
+        help="Total devido (somente leitura)",
+        format="R$ %.2f",
+        disabled=True,
+    ),
+    "N_Observacoes": st.column_config.TextColumn(
+        "N - Observações",
+        help="Observações adicionais (editável)",
+    ),
+    "O_IndiceConciliacao": st.column_config.NumberColumn(
+        "O - Índice Conciliação",
+        help="Índice de conciliação (somente leitura)",
+        format="%.2f%%",
+        disabled=True,
+    ),
+}
+
+# Lista de colunas de cálculo que devem permanecer desabilitadas
+colunas_calculo_disabled = [
+    "J_PercentualUsado",
+    "K_Diferenca",
+    "L_Status",
+    "M_TotalDevido",
+    "O_IndiceConciliacao",
+]
+
+# Renderiza o data_editor
+# As colunas A_Cartao, B_Resumo, C_Titular, D_CPF, E_Localidade e F_Limite
+# NÃO possuem disabled=True, portanto são editáveis.
+df_editado = st.data_editor(
+    st.session_state.df_conciliacao,
+    column_config=column_config,
+    disabled=colunas_calculo_disabled,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="data_editor_conciliacao",
+    hide_index=True,
+)
+
+# ---------------------------------------------------------------------------
+# Processamento das edições
+# ---------------------------------------------------------------------------
+if df_editado is not None and not df_editado.equals(st.session_state.df_conciliacao):
+    # Atualiza o DataFrame com as edições manuais das colunas A a F
+    st.session_state.df_conciliacao = df_editado.copy()
+
+    # Recalcula as colunas de cálculo de forma segura
+    st.session_state.df_conciliacao = recalcular_colunas(
+        st.session_state.df_conciliacao
+    )
+
+    # Garante que os valores numéricos estejam corretamente tipados
+    colunas_numericas = [
+        "F_Limite",
+        "G_Valores",
+        "H_Pagamentos",
+        "I_Saldo",
+        "J_PercentualUsado",
+        "K_Diferenca",
+        "M_TotalDevido",
+        "O_IndiceConciliacao",
+    ]
+    for col in colunas_numericas:
+        st.session_state.df_conciliacao[col] = (
+            st.session_state.df_conciliacao[col].apply(to_number)
         )
-    else:
-        st.info("Carregue um arquivo para iniciar a conciliacao.")
+
+    st.success("✅ Edições manuais aplicadas e colunas de cálculo recalculadas!")
+    st.rerun()
 
 
-if __name__ == '__main__':
-    main()
+# ---------------------------------------------------------------------------
+# Resumo e exportação
+# ---------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("### 📊 Resumo da Conciliação")
+
+df_atual = st.session_state.df_conciliacao
+
+col1, col2, col3, col4 = st.columns(4)
+
+total_limite = df_atual["F_Limite"].apply(to_number).sum()
+total_valores = df_atual["G_Valores"].apply(to_number).sum()
+total_pagamentos = df_atual["H_Pagamentos"].apply(to_number).sum()
+total_divergencias = (
+    df_atual["K_Diferenca"].apply(to_number).abs().apply(lambda x: x if x >= 0.01 else 0).sum()
+)
+
+col1.metric("Total Limite", safe_format_currency(total_limite))
+col2.metric("Total Valores", safe_format_currency(total_valores))
+col3.metric("Total Pagamentos", safe_format_currency(total_pagamentos))
+col4.metric("Total Divergências", safe_format_currency(total_divergencias))
+
+
+# ---------------------------------------------------------------------------
+# Exportação para Excel
+# ---------------------------------------------------------------------------
+st.markdown("### 📥 Exportar")
+
+def exportar_excel(df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Conciliação")
+    return output.getvalue()
+
+
+st.download_button(
+    label="⬇️ Baixar Excel",
+    data=exportar_excel(df_atual),
+    file_name="conciliacao.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+if st.button("🔄 Recalcular Tudo"):
+    st.session_state.df_conciliacao = recalcular_colunas(df_atual)
+    st.success("✅ Recálculo concluído!")
+    st.rerun()
+
+if st.button("🗑️ Restaurar Dados de Exemplo"):
+    st.session_state.df_conciliacao = load_sample_data().copy()
+    st.cache_data.clear()
+    st.success("✅ Dados restaurados!")
+    st.rerun()
