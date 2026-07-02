@@ -21,344 +21,377 @@ Estrutura de colunas (A até O):
 """
 import streamlit as st
 import pandas as pd
-from decimal import Decimal, ROUND_HALF_UP
-
-# ---------------------------------------------------------------------------
-# Configuração da página
-# ---------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Conciliação Bradesco",
-    page_icon="💳",
-    layout="wide",
-)
-
-st.title("Conciliação Bradesco")
-
-# ---------------------------------------------------------------------------
-# Chaves internas das colunas A a O
-# ---------------------------------------------------------------------------
-COLUNAS_TEXTO = [
-    "A_Cartao",
-    "B_Bandeira",
-    "C_Titular",
-    "D_Categoria",
-    "E_Status",
-]
-
-COLUNAS_NUMERO = [
-    "F_Compras",
-    "G_Pagamentos",
-    "H_Taxas",
-    "I_SaldoInicial",
-    "J_TotalDebito",
-    "K_AposPagamento",
-    "L_ComTaxas",
-    "M_PagMinimo",
-    "N_SaldoDevedor",
-    "O_SaldoFinal",
-]
-
-TODAS_COLUNAS = COLUNAS_TEXTO + COLUNAS_NUMERO
-
-# Apelidos padrão (rótulos exibidos no data_editor)
-APELIDOS_PADRAO = {
-    "A_Cartao": "A - Cartão",
-    "B_Bandeira": "B - Bandeira",
-    "C_Titular": "C - Titular",
-    "D_Categoria": "D - Categoria",
-    "E_Status": "E - Status",
-    "F_Compras": "F - Compras",
-    "G_Pagamentos": "G - Pagamentos",
-    "H_Taxas": "H - Taxas",
-    "I_SaldoInicial": "I - Saldo Inicial",
-    "J_TotalDebito": "J - Total Débito",
-    "K_AposPagamento": "K - Após Pagamento",
-    "L_ComTaxas": "L - Com Taxas",
-    "M_PagMinimo": "M - Pag. Mínimo",
-    "N_SaldoDevedor": "N - Saldo Devedor",
-    "O_SaldoFinal": "O - Saldo Final",
-}
-
-# ---------------------------------------------------------------------------
-# Inicialização do session_state
-# ---------------------------------------------------------------------------
-if "apelidos" not in st.session_state:
-    st.session_state.apelidos = dict(APELIDOS_PADRAO)
-
-# Garante que TODAS as chaves A a O existam no dicionário de apelidos
-for chave, apelido_padrao in APELIDOS_PADRAO.items():
-    if chave not in st.session_state.apelidos or not st.session_state.apelidos[chave]:
-        st.session_state.apelidos[chave] = apelido_padrao
-
-if "dados" not in st.session_state:
-    st.session_state.dados = {}
-
-if "anos_disponiveis" not in st.session_state:
-    st.session_state.anos_disponiveis = list(range(2023, 2031))
-
-if "ano_selecionado" not in st.session_state:
-    st.session_state.ano_selecionado = st.session_state.anos_disponiveis[0]
-
-if "mes_selecionado" not in st.session_state:
-    st.session_state.mes_selecionado = 1
-
-MESES = [
-    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
-]
+import numpy as np
+from io import BytesIO
 
 
-def chave_periodo(ano: int, mes: int) -> str:
-    return f"{ano}-{mes:02d}"
-
-
-def obter_dataframe_periodo(ano: int, mes: int) -> pd.DataFrame:
-    """Retorna o DataFrame do período, criando um vazio se não existir."""
-    chave = chave_periodo(ano, mes)
-    if chave not in st.session_state.dados:
-        st.session_state.dados[chave] = pd.DataFrame(columns=TODAS_COLUNAS)
-    df = st.session_state.dados[chave].copy()
-    # Garante que todas as colunas existam
-    for col in TODAS_COLUNAS:
-        if col not in df.columns:
-            df[col] = None
-    return df[TODAS_COLUNAS]
-
-
-def salvar_dataframe_periodo(ano: int, mes: int, df: pd.DataFrame) -> None:
-    chave = chave_periodo(ano, mes)
-    st.session_state.dados[chave] = df.copy()
-
-
-def calcular_saldo_final(df: pd.DataFrame) -> pd.DataFrame:
+# -----------------------------------------------------------------------------
+# Funções utilitárias (definidas no topo para robustez)
+# -----------------------------------------------------------------------------
+def recalcular(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aplica a lógica de transporte de saldo linha a linha.
-
-    - Saldo Inicial (I) da primeira linha vem do Saldo Final (O) do período anterior.
-    - Saldo Inicial das linhas seguintes = Saldo Final da linha anterior.
-    - Total Débito (J) = Compras (F) + Taxas (H)
-    - Após Pagamento (K) = Saldo Inicial (I) + Total Débito (J) - Pagamentos (G)
-    - Com Taxas (L) = Após Pagamento (K) + Taxas (H)
-    - Pag. Mínimo (M) = 5% de Com Taxas (L)
-    - Saldo Devedor (N) = Com Taxas (L) - Pagamentos (G)
-    - Saldo Final (O) = Saldo Devedor (N)
+    Recalcula automaticamente as colunas J a O com base nos valores editáveis.
+    Utiliza pd.to_numeric(errors='coerce').fillna(0) para garantir robustez.
     """
     df = df.copy()
 
-    # Converte colunas numéricas para float
-    for col in COLUNAS_NUMERO:
+    # Garantir que as colunas numéricas sejam tratadas como número
+    for col in ["F", "G", "H", "I", "N"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Saldo inicial do período: transporta do período anterior
-    ano = st.session_state.ano_selecionado
-    mes = st.session_state.mes_selecionado
-    mes_anterior = mes - 1
-    ano_anterior = ano
-    if mes_anterior < 1:
-        mes_anterior = 12
-        ano_anterior = ano - 1
+    # J (Dif. Pagar): H - G se H > G, senão 0
+    df["J"] = np.where(df["H"] > df["G"], df["H"] - df["G"], 0)
 
-    saldo_inicial_periodo = 0.0
-    chave_anterior = chave_periodo(ano_anterior, mes_anterior)
-    if chave_anterior in st.session_state.dados:
-        df_anterior = st.session_state.dados[chave_anterior]
-        if not df_anterior.empty and "O_SaldoFinal" in df_anterior.columns:
-            serie = pd.to_numeric(df_anterior["O_SaldoFinal"], errors="coerce").fillna(0.0)
-            saldo_inicial_periodo = float(serie.iloc[-1])
+    # K (Dif. Receber): G - H se G > H, senão 0
+    df["K"] = np.where(df["G"] > df["H"], df["G"] - df["H"], 0)
 
-    saldo_corrente = saldo_inicial_periodo
+    # L (Saldo Final Ajustado): I + J - K
+    df["L"] = pd.to_numeric(df["I"], errors="coerce").fillna(0) + \
+              pd.to_numeric(df["J"], errors="coerce").fillna(0) - \
+              pd.to_numeric(df["K"], errors="coerce").fillna(0)
 
-    for idx in df.index:
-        compras = float(df.at[idx, "F_Compras"] or 0.0)
-        pagamentos = float(df.at[idx, "G_Pagamentos"] or 0.0)
-        taxas = float(df.at[idx, "H_Taxas"] or 0.0)
+    # M (Saldo Próxima Reunião): G + L - H
+    df["M"] = pd.to_numeric(df["G"], errors="coerce").fillna(0) + \
+              pd.to_numeric(df["L"], errors="coerce").fillna(0) - \
+              pd.to_numeric(df["H"], errors="coerce").fillna(0)
 
-        saldo_inicial = saldo_corrente
-        total_debito = compras + taxas
-        apos_pagamento = saldo_inicial + total_debito - pagamentos
-        com_taxas = apos_pagamento + taxas
-        pag_minimo = round(com_taxas * 0.05, 2)
-        saldo_devedor = com_taxas - pagamentos
-        saldo_final = saldo_devedor
-
-        df.at[idx, "I_SaldoInicial"] = round(saldo_inicial, 2)
-        df.at[idx, "J_TotalDebito"] = round(total_debito, 2)
-        df.at[idx, "K_AposPagamento"] = round(apos_pagamento, 2)
-        df.at[idx, "L_ComTaxas"] = round(com_taxas, 2)
-        df.at[idx, "M_PagMinimo"] = round(pag_minimo, 2)
-        df.at[idx, "N_SaldoDevedor"] = round(saldo_devedor, 2)
-        df.at[idx, "O_SaldoFinal"] = round(saldo_final, 2)
-
-        saldo_corrente = saldo_final
+    # O (Saldo Final do Mês): G + L - N
+    df["O"] = pd.to_numeric(df["G"], errors="coerce").fillna(0) + \
+              pd.to_numeric(df["L"], errors="coerce").fillna(0) - \
+              pd.to_numeric(df["N"], errors="coerce").fillna(0)
 
     return df
 
 
-def arredondar(valor: float) -> float:
-    return float(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def criar_dataframe_vazio(n_linhas: int = 10) -> pd.DataFrame:
+    """Cria um DataFrame vazio com as colunas A até O."""
+    colunas = [chr(c) for c in range(ord("A"), ord("O") + 1)]
+    df = pd.DataFrame(np.nan, index=range(n_linhas), columns=colunas)
+    # Inicializar colunas numéricas com 0
+    for col in ["F", "G", "H", "I", "N"]:
+        df[col] = 0
+    return df
 
 
-# ---------------------------------------------------------------------------
-# Barra lateral
-# ---------------------------------------------------------------------------
+def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza um DataFrame importado para o formato esperado (colunas A a O).
+    """
+    colunas_esperadas = [chr(c) for c in range(ord("A"), ord("O") + 1)]
+    df = df_import.copy()
+
+    # Renomear colunas se o número coincidir
+    if len(df.columns) == len(colunas_esperadas):
+        df.columns = colunas_esperadas
+    else:
+        # Garantir que todas as colunas existam
+        for col in colunas_esperadas:
+            if col not in df.columns:
+                df[col] = np.nan
+        df = df[colunas_esperadas]
+
+    # Garantir tipos
+    for col in ["A", "B", "C", "D", "E"]:
+        df[col] = df[col].astype(str).replace("nan", "")
+    for col in ["F", "G", "H", "I", "N"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    return recalcular(df)
+
+
+def chave_periodo(ano: int, mes: str) -> str:
+    """Retorna a chave de sessão para um período."""
+    return f"dados_{ano}_{mes}"
+
+
+def mes_seguinte(mes: str) -> str:
+    """Retorna o nome do mês seguinte."""
+    meses = [
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ]
+    idx = meses.index(mes)
+    return meses[(idx + 1) % 12]
+
+
+def ano_seguinte(ano: int, mes: str) -> int:
+    """Retorna o ano do mês seguinte."""
+    return ano + 1 if mes == "Dezembro" else ano
+
+
+# -----------------------------------------------------------------------------
+# Configuração da página
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Sistema de Conciliação Bradesco",
+    page_icon="🏦",
+    layout="wide",
+)
+
+st.title("🏦 Sistema de Conciliação Bradesco")
+st.caption("Versão definitiva - Conciliação por período com transporte de saldo individualizado")
+
+# -----------------------------------------------------------------------------
+# Inicialização do session_state
+# -----------------------------------------------------------------------------
+if "apelidos" not in st.session_state:
+    st.session_state["apelidos"] = {
+        "A": "Cartão",
+        "B": "Titular",
+        "C": "Agência",
+        "D": "Conta",
+        "E": "Observação",
+        "F": "Saldo Inicial",
+        "G": "Total a Pagar",
+        "H": "Total Pago",
+        "I": "Saldo Anterior",
+        "J": "Dif. Pagar",
+        "K": "Dif. Receber",
+        "L": "Saldo Final Ajustado",
+        "M": "Saldo Próxima Reunião",
+        "N": "Ajuste Manual",
+        "O": "Saldo Final do Mês",
+    }
+
+if "periodo_atual" not in st.session_state:
+    st.session_state["periodo_atual"] = {"ano": 2024, "mes": "Janeiro"}
+
+# -----------------------------------------------------------------------------
+# Sidebar - Controle de Período
+# -----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Navegação")
+    st.header("📅 Controle de Período")
 
-    # Navegação por Ano/Mês
-    st.session_state.ano_selecionado = st.selectbox(
-        "Ano",
-        options=st.session_state.anos_disponiveis,
-        index=st.session_state.anos_disponiveis.index(st.session_state.ano_selecionado)
-        if st.session_state.ano_selecionado in st.session_state.anos_disponiveis
-        else 0,
-        key="select_ano",
-    )
+    anos = list(range(2024, 2031))
+    meses = [
+        "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ]
 
-    indice_mes = st.session_state.mes_selecionado - 1
-    mes_nome = st.selectbox(
-        "Mês",
-        options=MESES,
-        index=indice_mes if 0 <= indice_mes < 12 else 0,
-        key="select_mes",
-    )
-    st.session_state.mes_selecionado = MESES.index(mes_nome) + 1
+    ano_selecionado = st.selectbox("Ano", anos,
+                                   index=anos.index(st.session_state["periodo_atual"]["ano"]))
+    mes_selecionado = st.selectbox("Mês", meses,
+                                   index=meses.index(st.session_state["periodo_atual"]["mes"]))
 
-    st.divider()
+    st.session_state["periodo_atual"] = {"ano": ano_selecionado, "mes": mes_selecionado}
 
-    # -----------------------------------------------------------------------
-    # Configurar Apelidos - TODAS as colunas A a O
-    # -----------------------------------------------------------------------
-    with st.expander("Configurar Apelidos", expanded=False):
-        st.caption("Edite o apelido exibido para cada coluna (A a O).")
+    chave = chave_periodo(ano_selecionado, mes_selecionado)
 
+    # ---------------------------------------------------------------------
+    # Configuração de Apelidos (A a O)
+    # ---------------------------------------------------------------------
+    with st.expander("✏️ Configurar Apelidos das Colunas", expanded=False):
         st.markdown("**Colunas Alfanuméricas (A - E)**")
-        for chave in COLUNAS_TEXTO:
-            st.text_input(
-                label=chave,
-                value=st.session_state.apelidos.get(chave, APELIDOS_PADRAO[chave]),
-                key=f"apelido_{chave}",
-                on_change=lambda c=chave: st.session_state.apelidos.update(
-                    {c: st.session_state[f"apelido_{c}"]}
-                ),
+        for col in ["A", "B", "C", "D", "E"]:
+            st.session_state["apelidos"][col] = st.text_input(
+                f"Coluna {col}",
+                value=st.session_state["apelidos"][col],
+                key=f"apelido_{col}"
             )
 
         st.markdown("**Colunas Numéricas (F - O)**")
-        for chave in COLUNAS_NUMERO:
-            st.text_input(
-                label=chave,
-                value=st.session_state.apelidos.get(chave, APELIDOS_PADRAO[chave]),
-                key=f"apelido_{chave}",
-                on_change=lambda c=chave: st.session_state.apelidos.update(
-                    {c: st.session_state[f"apelido_{c}"]}
-                ),
+        for col in [chr(c) for c in range(ord("F"), ord("O") + 1)]:
+            st.session_state["apelidos"][col] = st.text_input(
+                f"Coluna {col}",
+                value=st.session_state["apelidos"][col],
+                key=f"apelido_{col}"
             )
 
     st.divider()
 
-    # Ações
-    if st.button("➕ Adicionar Linha", use_container_width=True):
-        df_atual = obter_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado)
-        nova_linha = {col: "" for col in COLUNAS_TEXTO}
-        nova_linha.update({col: 0.0 for col in COLUNAS_NUMERO})
-        df_atual = pd.concat([df_atual, pd.DataFrame([nova_linha])], ignore_index=True)
-        salvar_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado, df_atual)
-        st.rerun()
+    # ---------------------------------------------------------------------
+    # Importação Inteligente
+    # ---------------------------------------------------------------------
+    st.header("📥 Importação Inteligente")
+    arquivo = st.file_uploader(
+        "Importar Excel/CSV",
+        type=["xlsx", "xls", "csv"],
+        key=f"uploader_{chave}"
+    )
 
-    if st.button("🔄 Recalcular Saldos", use_container_width=True):
-        df_atual = obter_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado)
-        df_atual = calcular_saldo_final(df_atual)
-        salvar_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado, df_atual)
-        st.rerun()
+    if arquivo is not None:
+        try:
+            if arquivo.name.lower().endswith(".csv"):
+                df_import = pd.read_csv(arquivo)
+            else:
+                df_import = pd.read_excel(arquivo)
+            df_normalizado = normalizar_dataframe_importado(df_import)
+            st.session_state[chave] = df_normalizado
+            st.success(f"✅ Arquivo importado e carregado para {mes_selecionado}/{ano_selecionado}!")
+        except Exception as e:
+            st.error(f"❌ Erro ao importar arquivo: {e}")
 
-# ---------------------------------------------------------------------------
-# Corpo principal
-# ---------------------------------------------------------------------------
-st.subheader(f"Período: {mes_nome} / {st.session_state.ano_selecionado}")
+    st.divider()
 
-df_periodo = obter_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado)
+    # ---------------------------------------------------------------------
+    # Botão Fechar Mês (Transporte de Saldo Individualizado)
+    # ---------------------------------------------------------------------
+    st.header("🔒 Fechar Mês")
+    if st.button("Fechar Mês e Transportar Saldo", type="primary"):
+        if chave in st.session_state and isinstance(st.session_state[chave], pd.DataFrame):
+            df_atual = st.session_state[chave].copy()
+            df_atual = recalcular(df_atual)
 
-# ---------------------------------------------------------------------------
-# Construção do column_config mapeando TODAS as chaves A a O
-# ---------------------------------------------------------------------------
+            # Coluna O de cada linha -> Coluna I do mês seguinte
+            prox_ano = ano_seguinte(ano_selecionado, mes_selecionado)
+            prox_mes = mes_seguinte(mes_selecionado)
+            prox_chave = chave_periodo(prox_ano, prox_mes)
+
+            if prox_chave not in st.session_state or not isinstance(st.session_state[prox_chave], pd.DataFrame):
+                st.session_state[prox_chave] = criar_dataframe_vazio(len(df_atual))
+
+            df_prox = st.session_state[prox_chave].copy()
+            # Garantir mesmo número de linhas
+            if len(df_prox) < len(df_atual):
+                # Adicionar linhas faltantes
+                colunas = [chr(c) for c in range(ord("A"), ord("O") + 1)]
+                linhas_extra = pd.DataFrame(np.nan,
+                                            index=range(len(df_prox), len(df_atual)),
+                                            columns=colunas)
+                for col in ["F", "G", "H", "I", "N"]:
+                    linhas_extra[col] = 0
+                df_prox = pd.concat([df_prox, linhas_extra], ignore_index=True)
+            elif len(df_prox) > len(df_atual):
+                df_prox = df_prox.iloc[:len(df_atual)].copy()
+
+            # Transportar O -> I linha a linha
+            for idx in range(len(df_atual)):
+                df_prox.at[idx, "I"] = pd.to_numeric(df_atual.at[idx, "O"], errors="coerce")
+                # Transportar também identificação (A e B) para facilitar
+                df_prox.at[idx, "A"] = df_atual.at[idx, "A"]
+                df_prox.at[idx, "B"] = df_atual.at[idx, "B"]
+
+            df_prox = recalcular(df_prox)
+            st.session_state[prox_chave] = df_prox
+            st.session_state[chave] = df_atual
+            st.success(f"✅ Mês fechado! Saldo transportado para {prox_mes}/{prox_ano}.")
+            st.rerun()
+        else:
+            st.warning("⚠️ Nenhum dado disponível para fechar o mês.")
+
+    st.divider()
+
+    # ---------------------------------------------------------------------
+    # Exportação
+    # ---------------------------------------------------------------------
+    st.header("📤 Exportar")
+    if chave in st.session_state and isinstance(st.session_state[chave], pd.DataFrame):
+        df_export = st.session_state[chave].copy()
+        # Renomear para apelidos
+        df_export = df_export.rename(columns=st.session_state["apelidos"])
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_export.to_excel(writer, index=False, sheet_name=f"{mes_selecionado[:3]}_{ano_selecionado}")
+        output.seek(0)
+        st.download_button(
+            label="⬇️ Baixar Excel",
+            data=output,
+            file_name=f"conciliacao_{mes_selecionado}_{ano_selecionado}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# -----------------------------------------------------------------------------
+# Área principal - Tabela do período selecionado
+# -----------------------------------------------------------------------------
+st.header(f"📊 Conciliação - {mes_selecionado} / {ano_selecionado}")
+
+# Obter ou criar DataFrame do período
+if chave not in st.session_state or not isinstance(st.session_state[chave], pd.DataFrame):
+    st.session_state[chave] = criar_dataframe_vazio(10)
+
+df_periodo = st.session_state[chave].copy()
+
+# Garantir que as colunas A-O existam e estejam tipadas corretamente
+colunas_esperadas = [chr(c) for c in range(ord("A"), ord("O") + 1)]
+for col in colunas_esperadas:
+    if col not in df_periodo.columns:
+        df_periodo[col] = 0 if col in ["F", "G", "H", "I", "N"] else ""
+
+df_periodo = df_periodo[colunas_esperadas]
+
+# Garantir tipos antes da edição
+for col in ["A", "B", "C", "D", "E"]:
+    df_periodo[col] = df_periodo[col].astype(str).replace("nan", "")
+for col in ["F", "G", "H", "I", "N"]:
+    df_periodo[col] = pd.to_numeric(df_periodo[col], errors="coerce").fillna(0)
+
+# Recalcular antes de exibir
+df_periodo = recalcular(df_periodo)
+
+# -----------------------------------------------------------------------------
+# Configuração das colunas do data_editor
+# -----------------------------------------------------------------------------
+apelidos = st.session_state["apelidos"]
+
+# Colunas editáveis: A, B, C, D, E, F, G, H, N
+colunas_editaveis = ["A", "B", "C", "D", "E", "F", "G", "H", "N"]
+
 column_config = {}
+for col in colunas_esperadas:
+    label = apelidos.get(col, col)
+    if col in ["A", "B", "C", "D", "E"]:
+        # Colunas alfanuméricas
+        column_config[col] = st.column_config.TextColumn(
+            label=label,
+            help=f"Coluna {col} (alfanumérica)",
+        )
+    else:
+        # Colunas numéricas (F a O)
+        column_config[col] = st.column_config.NumberColumn(
+            label=label,
+            help=f"Coluna {col} (numérica)",
+            format="R$ %.2f",
+        )
 
-# Colunas A a E => TextColumn (alfanumérico)
-for chave in COLUNAS_TEXTO:
-    column_config[chave] = st.column_config.TextColumn(
-        label=st.session_state.apelidos.get(chave, APELIDOS_PADRAO[chave]),
-        help=f"Coluna alfanumérica {chave}",
-    )
+# Definir quais colunas são editáveis
+disabled_cols = [col for col in colunas_esperadas if col not in colunas_editaveis]
 
-# Colunas F a O => NumberColumn
-for chave in COLUNAS_NUMERO:
-    column_config[chave] = st.column_config.NumberColumn(
-        label=st.session_state.apelidos.get(chave, APELIDOS_PADRAO[chave]),
-        help=f"Coluna numérica {chave}",
-        format="%.2f",
-        step=0.01,
-    )
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Data Editor
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 df_editado = st.data_editor(
     df_periodo,
     column_config=column_config,
+    disabled=disabled_cols,
     num_rows="dynamic",
     use_container_width=True,
-    key=f"editor_{chave_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado)}",
-    hide_index=False,
+    key=f"editor_{chave}",
+    hide_index=True,
 )
 
-# Salva as edições do usuário
-salvar_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado, df_editado)
+# Salvar edições e recalcular
+df_recalculado = recalcular(df_editado)
+st.session_state[chave] = df_recalculado
 
-# ---------------------------------------------------------------------------
-# Recálculo automático de saldos após edição
-# ---------------------------------------------------------------------------
-df_recalculado = calcular_saldo_final(df_editado)
-salvar_dataframe_periodo(st.session_state.ano_selecionado, st.session_state.mes_selecionado, df_recalculado)
-
-st.divider()
-
-# Exibe o DataFrame recalculado (somente leitura) para conferência
-st.markdown("### Visualização com Saldos Recalculados")
-st.dataframe(
-    df_recalculado.rename(columns=st.session_state.apelidos),
-    use_container_width=True,
-    hide_index=False,
-)
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Resumo do período
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 st.divider()
-st.markdown("### Resumo do Período")
+st.subheader("📋 Resumo do Período")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric(
-        label=st.session_state.apelidos.get("F_Compras", "F - Compras"),
-        value=f"R$ {arredondar(df_recalculado['F_Compras'].sum()):,.2f}",
-    )
+    total_pagar = pd.to_numeric(df_recalculado["G"], errors="coerce").fillna(0).sum()
+    st.metric("Total a Pagar (G)", f"R$ {total_pagar:,.2f}")
 with col2:
-    st.metric(
-        label=st.session_state.apelidos.get("G_Pagamentos", "G - Pagamentos"),
-        value=f"R$ {arredondar(df_recalculado['G_Pagamentos'].sum()):,.2f}",
-    )
+    total_pago = pd.to_numeric(df_recalculado["H"], errors="coerce").fillna(0).sum()
+    st.metric("Total Pago (H)", f"R$ {total_pago:,.2f}")
 with col3:
-    st.metric(
-        label=st.session_state.apelidos.get("H_Taxas", "H - Taxas"),
-        value=f"R$ {arredondar(df_recalculado['H_Taxas'].sum()):,.2f}",
-    )
+    total_dif_pagar = pd.to_numeric(df_recalculado["J"], errors="coerce").fillna(0).sum()
+    st.metric("Dif. Pagar (J)", f"R$ {total_dif_pagar:,.2f}")
 with col4:
-    saldo_final_exibido = (
-        float(df_recalculado["O_SaldoFinal"].iloc[-1])
-        if not df_recalculado.empty
-        else 0.0
-    )
-    st.metric(
-        label=st.session_state.apelidos.get("O_SaldoFinal", "O - Saldo Final"),
-        value=f"R$ {arredondar(saldo_final_exibido):,.2f}",
-    )
+    total_saldo_final = pd.to_numeric(df_recalculado["O"], errors="coerce").fillna(0).sum()
+    st.metric("Saldo Final Mês (O)", f"R$ {total_saldo_final:,.2f}")
+
+# -----------------------------------------------------------------------------
+# Informações de debug / status
+# -----------------------------------------------------------------------------
+with st.expander("🔍 Informações Técnicas", expanded=False):
+    st.write(f"**Período ativo:** {mes_selecionado} / {ano_selecionado}")
+    st.write(f"**Chave de sessão:** `{chave}`")
+    st.write(f"**Colunas editáveis:** {', '.join(colunas_editaveis)}")
+    st.write(f"**Colunas calculadas:** J, K, L, M, O")
+    st.write(f"**Linhas na tabela:** {len(df_recalculado)}")
+    st.write("**Apelidos atuais:**")
+    st.json(apelidos)
