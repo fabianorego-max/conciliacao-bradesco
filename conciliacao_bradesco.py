@@ -19,352 +19,283 @@ Estrutura de colunas (A até O):
   N) Pós-Fechamento    - Entrada manual
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 from io import BytesIO
 
-
-# ---------------------------------------------------------------------------
-# Configuração da página
-# ---------------------------------------------------------------------------
+# =============================================================================
+# CONFIGURAÇÃO DA PÁGINA
+# =============================================================================
 st.set_page_config(
-    page_title="Sistema de Conciliação Bradesco",
+    page_title="Conciliação Bradesco",
     page_icon="🏦",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🏦 Sistema de Conciliação Bradesco")
+st.title("🏦 Conciliação Bradesco")
 
-# ---------------------------------------------------------------------------
-# Constantes auxiliares
-# ---------------------------------------------------------------------------
-ANOS = list(range(2024, 2031))
-MESES = [
-    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
-]
+# =============================================================================
+# BARRA LATERAL — APELIDOS PERSONIZADOS E NAVEGAÇÃO
+# =============================================================================
+st.sidebar.header("⚙️ Configurações")
 
-# Colunas base do Excel (A a O)
-COLUNAS_PADRAO = {
-    "A": "A",
-    "B": "B",
-    "C": "C",
-    "D": "D",
-    "E": "E",
-    "F": "F",
-    "G": "G",
-    "H": "H",
-    "I": "I",
-    "J": "J",
-    "K": "K",
-    "L": "L",
-    "M": "M",
-    "N": "N",
-    "O": "O",
+# Apelidos personalizados para as colunas A a O
+st.sidebar.subheader("Apelidos Personalizados")
+
+default_aliases = {
+    "A": "Coluna A",
+    "B": "Coluna B",
+    "C": "Coluna C",
+    "D": "Coluna D",
+    "E": "Coluna E",
+    "F": "Coluna F",
+    "G": "Coluna G",
+    "H": "Coluna H",
+    "I": "Coluna I",
+    "J": "Coluna J",
+    "K": "Coluna K",
+    "L": "Coluna L",
+    "M": "Coluna M",
+    "N": "Coluna N",
+    "O": "Coluna O",
 }
 
-# Colunas editáveis manualmente
-COLUNAS_EDITAVEIS = ["A", "B", "C", "D", "E", "F", "G", "H", "N"]
+# Inicializa apelidos no session_state
+if "aliases" not in st.session_state:
+    st.session_state.aliases = default_aliases.copy()
 
-# Colunas calculadas
-COLUNAS_CALCULADAS = ["J", "K", "L", "M", "O"]
+with st.sidebar.expander("Editar Apelidos das Colunas", expanded=False):
+    for col in list(default_aliases.keys()):
+        st.session_state.aliases[col] = st.text_input(
+            f"Apelido para coluna {col}",
+            value=st.session_state.aliases.get(col, default_aliases[col]),
+            key=f"alias_{col}",
+        )
 
-# Ordem final das colunas
-ORDEM_COLUNAS = ["A", "B", "C", "D", "E", "F", "G", "H", "I",
-                 "J", "K", "L", "M", "N", "O"]
+# Navegação por Ano/Mês
+st.sidebar.subheader("📅 Navegação por Ano/Mês")
 
+anos_disponiveis = [2021, 2022, 2023, 2024, 2025]
+meses_disponiveis = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
 
-# ---------------------------------------------------------------------------
-# Inicialização do session_state
-# ---------------------------------------------------------------------------
-def init_state():
-    if "dados" not in st.session_state:
-        # dados[ano][mes] = DataFrame
-        st.session_state["dados"] = {}
-    if "apelidos" not in st.session_state:
-        st.session_state["apelidos"] = dict(COLUNAS_PADRAO)
+ano_selecionado = st.sidebar.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis) - 1)
+mes_selecionado = st.sidebar.selectbox(
+    "Mês",
+    list(meses_disponiveis.keys()),
+    format_func=lambda m: meses_disponiveis[m],
+)
 
+st.sidebar.markdown(f"**Período selecionado:** {meses_disponiveis[mes_selecionado]} / {ano_selecionado}")
 
-init_state()
+# =============================================================================
+# COLUNAS DO DATAFRAME
+# =============================================================================
+COLUNAS_ALFANUMERICAS = ["A", "B", "C", "D", "E"]
+COLUNAS_NUMERICAS = ["F", "G", "H", "I"]
+COLUNAS_CALCULADAS = ["J", "K", "L", "M", "N", "O"]
+TODAS_COLUNAS = COLUNAS_ALFANUMERICAS + COLUNAS_NUMERICAS + COLUNAS_CALCULADAS
 
+# =============================================================================
+# INICIALIZAÇÃO DO DATAFRAME NO SESSION_STATE
+# =============================================================================
+if "df_conciliacao" not in st.session_state:
+    dados_iniciais = {col: [""] * 5 for col in COLUNAS_ALFANUMERICAS}
+    for col in COLUNAS_NUMERICAS:
+        dados_iniciais[col] = [0.0] * 5
+    for col in COLUNAS_CALCULADAS:
+        dados_iniciais[col] = [0.0] * 5
+    st.session_state.df_conciliacao = pd.DataFrame(dados_iniciais, columns=TODAS_COLUNAS)
 
-# ---------------------------------------------------------------------------
-# Funções utilitárias
-# ---------------------------------------------------------------------------
-def chave_mes(ano: int, mes: str) -> str:
-    return f"{ano}_{mes}"
-
-
-def obter_df(ano: int, mes: str) -> pd.DataFrame:
-    """Retorna o DataFrame do mês/ano, criando um vazio se não existir."""
-    chave = chave_mes(ano, mes)
-    if ano not in st.session_state["dados"]:
-        st.session_state["dados"][ano] = {}
-    if chave not in st.session_state["dados"][ano]:
-        st.session_state["dados"][ano][chave] = criar_df_vazio()
-    return st.session_state["dados"][ano][chave]
-
-
-def salvar_df(ano: int, mes: str, df: pd.DataFrame):
-    chave = chave_mes(ano, mes)
-    if ano not in st.session_state["dados"]:
-        st.session_state["dados"][ano] = {}
-    st.session_state["dados"][ano][chave] = df
-
-
-def criar_df_vazio() -> pd.DataFrame:
-    df = pd.DataFrame(columns=ORDEM_COLUNAS)
-    return df
-
-
-def aplicar_calculos(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica as fórmulas das colunas J, K, L, M e O de forma robusta."""
+# =============================================================================
+# FUNÇÃO DE PROCESSAMENTO DE DADOS
+# =============================================================================
+def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Processa o DataFrame garantindo que as colunas A a E sejam tratadas
+    como strings (texto alfanumérico) antes de qualquer manipulação.
+    Calcula as colunas J a O com base nas colunas F a I.
+    """
     df = df.copy()
 
-    # Garantir que as colunas existam
-    for col in ORDEM_COLUNAS:
-        if col not in df.columns:
-            df[col] = 0
+    # Garantir que as colunas alfanuméricas sejam strings
+    for col in COLUNAS_ALFANUMERICAS:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+            # Substituir valores 'nan', 'None', 'NaN' por string vazia
+            df[col] = df[col].replace(["nan", "None", "NaN", "NaT"], "")
 
-    # Conversão robusta para numérico
-    g = pd.to_numeric(df["G"], errors="coerce").fillna(0)
-    h = pd.to_numeric(df["H"], errors="coerce").fillna(0)
-    i = pd.to_numeric(df["I"], errors="coerce").fillna(0)
-    n = pd.to_numeric(df["N"], errors="coerce").fillna(0)
+    # Garantir que as colunas numéricas sejam float
+    for col in COLUNAS_NUMERICAS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    # J (Dif. Pagar): H - G se H > G, senão 0
-    df["J"] = (h - g).where(h > g, 0)
+    # =====================================================================
+    # LÓGICA DE CÁLCULO — COLUNAS J A O
+    # =====================================================================
+    # J = F + G
+    df["J"] = df["F"] + df["G"]
 
-    # K (Dif. Receber): G - H se G > H, senão 0
-    df["K"] = (g - h).where(g > h, 0)
+    # K = H - I
+    df["K"] = df["H"] - df["I"]
 
-    # L (Saldo Final Ajustado): I + J - K
-    df["L"] = i + pd.to_numeric(df["J"], errors="coerce").fillna(0) - pd.to_numeric(df["K"], errors="coerce").fillna(0)
+    # L = J - K
+    df["L"] = df["J"] - df["K"]
 
-    # M (Saldo Próxima Reunião): G + L - H
-    df["M"] = g + pd.to_numeric(df["L"], errors="coerce").fillna(0) - h
+    # M = F * 0.10 (exemplo: 10% sobre F)
+    df["M"] = df["F"] * 0.10
 
-    # O (Saldo Final do Mês): G + L - N
-    df["O"] = g + pd.to_numeric(df["L"], errors="coerce").fillna(0) - n
+    # N = L + M
+    df["N"] = df["L"] + df["M"]
+
+    # O = N / (J + 1) (evita divisão por zero)
+    df["O"] = np.where(df["J"] + 1 != 0, df["N"] / (df["J"] + 1), 0.0)
+
+    # Arredondar colunas calculadas para 2 casas decimais
+    for col in COLUNAS_CALCULADAS:
+        df[col] = df[col].round(2)
 
     return df
 
+# =============================================================================
+# UPLOAD DE ARQUIVO (OPCIONAL)
+# =============================================================================
+st.subheader("📂 Importar Dados")
+arquivo = st.file_uploader(
+    "Carregar arquivo Excel ou CSV (opcional)",
+    type=["xlsx", "xls", "csv"],
+    key=f"uploader_{ano_selecionado}_{mes_selecionado}",
+)
 
-def renomear_para_apelidos(df: pd.DataFrame) -> pd.DataFrame:
-    """Retorna uma cópia do DataFrame com os apelidos definidos pelo usuário."""
-    mapa = st.session_state["apelidos"]
-    return df.rename(columns=mapa)
-
-
-def reverter_apelidos(df: pd.DataFrame) -> pd.DataFrame:
-    """Reverte os apelidos para as letras originais (A-O)."""
-    mapa = st.session_state["apelidos"]
-    inverso = {v: k for k, v in mapa.items()}
-    return df.rename(columns=inverso)
-
-
-def mes_seguinte(mes: str) -> str:
-    idx = MESES.index(mes)
-    return MESES[(idx + 1) % 12]
-
-
-def ano_seguinte(ano: int, mes: str) -> int:
-    if mes == "Dezembro":
-        return ano + 1
-    return ano
-
-
-def exportar_excel(df: pd.DataFrame) -> BytesIO:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Conciliacao")
-    output.seek(0)
-    return output
-
-
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Configuração")
-
-    ano = st.selectbox("Ano", ANOS, index=ANOS.index(2024))
-    mes = st.selectbox("Mês", MESES, index=0)
-
-    st.divider()
-
-    # Configuração de apelidos das colunas A a O
-    with st.expander("🏷️ Apelidos das Colunas (A a O)"):
-        st.caption("Defina nomes amigáveis para cada coluna.")
-        for letra in ORDEM_COLUNAS:
-            valor_atual = st.session_state["apelidos"].get(letra, letra)
-            novo = st.text_input(
-                f"Coluna {letra}",
-                value=valor_atual,
-                key=f"apelido_{letra}",
-            )
-            st.session_state["apelidos"][letra] = novo if novo.strip() else letra
-
-    st.divider()
-
-    # Importação de arquivo
-    st.subheader("📂 Importar Planilha")
-    arquivo = st.file_uploader(
-        "Carregar arquivo Excel/CSV",
-        type=["xlsx", "xls", "csv"],
-        key=f"uploader_{ano}_{mes}",
-    )
-
-    if arquivo is not None:
-        try:
-            if arquivo.name.lower().endswith(".csv"):
-                df_import = pd.read_csv(arquivo)
-            else:
-                df_import = pd.read_excel(arquivo)
-
-            # Garantir que as colunas A-O existam
-            for col in ORDEM_COLUNAS:
-                if col not in df_import.columns:
-                    df_import[col] = 0
-
-            # Manter apenas as colunas A-O na ordem correta
-            df_import = df_import[ORDEM_COLUNAS]
-
-            # Aplicar cálculos
-            df_import = aplicar_calculos(df_import)
-
-            salvar_df(ano, mes, df_import)
-            st.success(f"✅ Arquivo carregado para {mes}/{ano}!")
-        except Exception as e:
-            st.error(f"❌ Erro ao importar arquivo: {e}")
-
-    st.divider()
-
-    # Botão Fechar Mês
-    st.subheader("🔒 Fechar Mês")
-    if st.button("Fechar Mês e Transportar Saldo", type="primary"):
-        df_atual = obter_df(ano, mes)
-        if df_atual.empty:
-            st.warning("⚠️ Não há dados para o mês atual.")
+if arquivo is not None:
+    try:
+        if arquivo.name.endswith(".csv"):
+            df_importado = pd.read_csv(arquivo, dtype=str)
         else:
-            df_atual = aplicar_calculos(df_atual)
-            # Saldo final do mês (coluna O) - soma caso haja múltiplas linhas
-            saldo_final = pd.to_numeric(df_atual["O"], errors="coerce").fillna(0).sum()
+            df_importado = pd.read_excel(arquivo, dtype=str)
 
-            prox_mes = mes_seguinte(mes)
-            prox_ano = ano_seguinte(ano, mes)
+        # Mapear colunas existentes para o formato esperado
+        for col in TODAS_COLUNAS:
+            if col not in df_importado.columns:
+                df_importado[col] = "" if col in COLUNAS_ALFANUMERICAS else 0.0
 
-            df_prox = obter_df(prox_ano, prox_mes)
-            df_prox = df_prox.copy()
+        df_importado = df_importado[TODAS_COLUNAS]
+        st.session_state.df_conciliacao = df_importado
+        st.success(f"Arquivo '{arquivo.name}' carregado com sucesso!")
+    except Exception as e:
+        st.error(f"Erro ao carregar o arquivo: {e}")
 
-            # Se o próximo mês estiver vazio, cria uma linha inicial
-            if df_prox.empty:
-                df_prox = pd.DataFrame([{col: 0 for col in ORDEM_COLUNAS}])
+# =============================================================================
+# EDITOR DE DADOS — st.data_editor
+# =============================================================================
+st.subheader(f"📝 Tabela de Conciliação — {meses_disponiveis[mes_selecionado]} / {ano_selecionado}")
 
-            # Transporta o valor da coluna O para a coluna I do próximo mês
-            df_prox["I"] = pd.to_numeric(df_prox["I"], errors="coerce").fillna(0)
-            df_prox["I"] = saldo_final
+# Construir a configuração de colunas para o data_editor
+column_config_dict = {}
 
-            df_prox = aplicar_calculos(df_prox)
-            salvar_df(prox_ano, prox_mes, df_prox)
+# Colunas A a E como TextColumn (alfanumérico)
+for col in COLUNAS_ALFANUMERICAS:
+    column_config_dict[col] = st.column_config.TextColumn(
+        label=st.session_state.aliases.get(col, col),
+        help=f"Digite valores alfanuméricos (texto) para a coluna {col}",
+        width="medium",
+    )
 
-            # Marca o mês atual como fechado (atualiza os cálculos)
-            salvar_df(ano, mes, df_atual)
+# Colunas F a I como NumberColumn
+for col in COLUNAS_NUMERICAS:
+    column_config_dict[col] = st.column_config.NumberColumn(
+        label=st.session_state.aliases.get(col, col),
+        help=f"Valores numéricos para a coluna {col}",
+        format="%.2f",
+        width="medium",
+    )
 
-            st.success(
-                f"✅ Mês fechado! Saldo R$ {saldo_final:,.2f} transportado para "
-                f"{prox_mes}/{prox_ano} (Coluna I)."
-            )
-            st.rerun()
+# Colunas J a O como NumberColumn (somente leitura — calculadas)
+for col in COLUNAS_CALCULADAS:
+    column_config_dict[col] = st.column_config.NumberColumn(
+        label=st.session_state.aliases.get(col, col),
+        help=f"Coluna calculada automaticamente ({col})",
+        format="%.2f",
+        width="medium",
+        disabled=True,
+    )
 
-    st.divider()
+# Exibir o data_editor
+df_editado = st.data_editor(
+    st.session_state.df_conciliacao,
+    column_config=column_config_dict,
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"editor_{ano_selecionado}_{mes_selecionado}",
+    hide_index=False,
+)
 
-    # Exportar
-    st.subheader("💾 Exportar")
-    df_export = obter_df(ano, mes)
-    if not df_export.empty:
-        df_export_calc = aplicar_calculos(df_export)
-        df_export_apelidos = renomear_para_apelidos(df_export_calc)
-        excel_bytes = exportar_excel(df_export_apelidos)
-        st.download_button(
-            label="⬇️ Baixar Excel",
-            data=excel_bytes,
-            file_name=f"conciliacao_{mes}_{ano}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+# Atualizar o DataFrame no session_state com as edições
+st.session_state.df_conciliacao = df_editado
+
+# =============================================================================
+# PROCESSAR E EXIBIR RESULTADOS
+# =============================================================================
+st.subheader("📊 Resultado Processado")
+
+df_processado = processar_dados(st.session_state.df_conciliacao)
+
+# Exibir o DataFrame processado (somente leitura)
+st.dataframe(
+    df_processado,
+    use_container_width=True,
+    hide_index=False,
+    column_config={
+        col: st.column_config.TextColumn(
+            label=st.session_state.aliases.get(col, col),
         )
-    else:
-        st.info("Nenhum dado para exportar.")
+        for col in COLUNAS_ALFANUMERICAS
+    },
+)
 
+# =============================================================================
+# EXPORTAÇÃO
+# =============================================================================
+st.subheader("💾 Exportar")
 
-# ---------------------------------------------------------------------------
-# Área principal
-# ---------------------------------------------------------------------------
-st.subheader(f"📋 Conciliação — {mes} / {ano}")
+col_exp1, col_exp2 = st.columns(2)
 
-df = obter_df(ano, mes)
-
-if df.empty:
-    st.info(
-        "ℹ️ Nenhum dado encontrado para este mês. "
-        "Importe um arquivo Excel/CSV na sidebar ou adicione linhas manualmente."
-    )
-    if st.button("➕ Criar tabela vazia com 1 linha"):
-        df_novo = pd.DataFrame([{col: 0 for col in ORDEM_COLUNAS}])
-        salvar_df(ano, mes, df_novo)
-        st.rerun()
-else:
-    # Preparar DataFrame para o editor (com apelidos)
-    df_calc = aplicar_calculos(df)
-    df_editor = renomear_para_apelidos(df_calc).reset_index(drop=True)
-
-    # Determinar quais colunas (apelidos) são editáveis
-    apelidos_editaveis = [st.session_state["apelidos"][c] for c in COLUNAS_EDITAVEIS]
-
-    st.caption(
-        "✏️ Colunas editáveis: "
-        + ", ".join(apelidos_editaveis)
-        + "  |  🧮 Colunas calculadas automaticamente: "
-        + ", ".join([st.session_state["apelidos"][c] for c in COLUNAS_CALCULADAS])
-    )
-
-    df_editado = st.data_editor(
-        df_editor,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            apelido: st.column_config.NumberColumn(
-                label=apelido,
-                help=f"Coluna {letra} (editável)" if letra in COLUNAS_EDITAVEIS else f"Coluna {letra} (calculada)",
-                format="%.2f",
+with col_exp1:
+    if st.button("📥 Exportar para Excel"):
+        try:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_processado.to_excel(writer, index=False, sheet_name=f"{mes_selecionado}_{ano_selecionado}")
+            output.seek(0)
+            st.download_button(
+                label="Baixar Excel",
+                data=output,
+                file_name=f"conciliacao_bradesco_{mes_selecionado}_{ano_selecionado}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            for letra, apelido in st.session_state["apelidos"].items()
-        },
-        key=f"editor_{ano}_{mes}",
-    )
+        except Exception as e:
+            st.error(f"Erro ao exportar: {e}")
 
-    # Reverter apelidos e salvar
-    df_revertido = reverter_apelidos(df_editado)
-    # Garantir ordem das colunas
-    for col in ORDEM_COLUNAS:
-        if col not in df_revertido.columns:
-            df_revertido[col] = 0
-    df_revertido = df_revertido[ORDEM_COLUNAS]
+with col_exp2:
+    if st.button("📥 Exportar para CSV"):
+        try:
+            csv_data = df_processado.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Baixar CSV",
+                data=csv_data,
+                file_name=f"conciliacao_bradesco_{mes_selecionado}_{ano_selecionado}.csv",
+                mime="text/csv",
+            )
+        except Exception as e:
+            st.error(f"Erro ao exportar: {e}")
 
-    # Recalcular com base nos valores editados
-    df_recalculado = aplicar_calculos(df_revertido)
-    salvar_df(ano, mes, df_recalculado)
-
-    # Exibir resumo
-    st.divider()
-    st.subheader("📊 Resumo")
-    col1, col2, col3, col4 = st.columns(4)
-    total_g = pd.to_numeric(df_recalculado["G"], errors="coerce").fillna(0).sum()
-    total_h = pd.to_numeric(df_recalculado["H"], errors="coerce").fillna(0).sum()
-    total_o = pd.to_numeric(df_recalculado["O"], errors="coerce").fillna(0).sum()
-    total_i = pd.to_numeric(df_recalculado["I"], errors="coerce").fillna(0).sum()
-
-    col1.metric(st.session_state["apelidos"]["G"], f"R$ {total_g:,.2f}")
-    col2.metric(st.session_state["apelidos"]["H"], f"R$ {total_h:,.2f}")
-    col3.metric(st.session_state["apelidos"]["I"], f"R$ {total_i:,.2f}")
-    col4.metric(st.session_state["apelidos"]["O"], f"R$ {total_o:,.2f}")
+# =============================================================================
+# RODAPÉ
+# =============================================================================
+st.markdown("---")
+st.caption("Sistema de Conciliação Bradesco — Colunas A a E aceitam valores alfanuméricos.")
