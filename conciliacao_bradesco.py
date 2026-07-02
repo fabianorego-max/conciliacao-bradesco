@@ -22,280 +22,156 @@ Estrutura de colunas (A até O):
 import streamlit as st
 import pandas as pd
 import numpy as np
-from io import BytesIO
+import io
 
-# =============================================================================
-# CONFIGURAÇÃO DA PÁGINA
-# =============================================================================
-st.set_page_config(
-    page_title="Conciliação Bradesco",
-    page_icon="🏦",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
-st.title("🏦 Conciliação Bradesco")
+def inicializar_session_state():
+    """Inicializa as variáveis de sessão utilizadas pela conciliação Bradesco."""
+    if "df_conciliacao" not in st.session_state:
+        st.session_state.df_conciliacao = pd.DataFrame()
 
-# =============================================================================
-# BARRA LATERAL — APELIDOS PERSONIZADOS E NAVEGAÇÃO
-# =============================================================================
-st.sidebar.header("⚙️ Configurações")
 
-# Apelidos personalizados para as colunas A a O
-st.sidebar.subheader("Apelidos Personalizados")
-
-default_aliases = {
-    "A": "Coluna A",
-    "B": "Coluna B",
-    "C": "Coluna C",
-    "D": "Coluna D",
-    "E": "Coluna E",
-    "F": "Coluna F",
-    "G": "Coluna G",
-    "H": "Coluna H",
-    "I": "Coluna I",
-    "J": "Coluna J",
-    "K": "Coluna K",
-    "L": "Coluna L",
-    "M": "Coluna M",
-    "N": "Coluna N",
-    "O": "Coluna O",
-}
-
-# Inicializa apelidos no session_state
-if "aliases" not in st.session_state:
-    st.session_state.aliases = default_aliases.copy()
-
-with st.sidebar.expander("Editar Apelidos das Colunas", expanded=False):
-    for col in list(default_aliases.keys()):
-        st.session_state.aliases[col] = st.text_input(
-            f"Apelido para coluna {col}",
-            value=st.session_state.aliases.get(col, default_aliases[col]),
-            key=f"alias_{col}",
-        )
-
-# Navegação por Ano/Mês
-st.sidebar.subheader("📅 Navegação por Ano/Mês")
-
-anos_disponiveis = [2021, 2022, 2023, 2024, 2025]
-meses_disponiveis = {
-    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
-    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
-    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
-}
-
-ano_selecionado = st.sidebar.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis) - 1)
-mes_selecionado = st.sidebar.selectbox(
-    "Mês",
-    list(meses_disponiveis.keys()),
-    format_func=lambda m: meses_disponiveis[m],
-)
-
-st.sidebar.markdown(f"**Período selecionado:** {meses_disponiveis[mes_selecionado]} / {ano_selecionado}")
-
-# =============================================================================
-# COLUNAS DO DATAFRAME
-# =============================================================================
-COLUNAS_ALFANUMERICAS = ["A", "B", "C", "D", "E"]
-COLUNAS_NUMERICAS = ["F", "G", "H", "I"]
-COLUNAS_CALCULADAS = ["J", "K", "L", "M", "N", "O"]
-TODAS_COLUNAS = COLUNAS_ALFANUMERICAS + COLUNAS_NUMERICAS + COLUNAS_CALCULADAS
-
-# =============================================================================
-# INICIALIZAÇÃO DO DATAFRAME NO SESSION_STATE
-# =============================================================================
-if "df_conciliacao" not in st.session_state:
-    dados_iniciais = {col: [""] * 5 for col in COLUNAS_ALFANUMERICAS}
-    for col in COLUNAS_NUMERICAS:
-        dados_iniciais[col] = [0.0] * 5
-    for col in COLUNAS_CALCULADAS:
-        dados_iniciais[col] = [0.0] * 5
-    st.session_state.df_conciliacao = pd.DataFrame(dados_iniciais, columns=TODAS_COLUNAS)
-
-# =============================================================================
-# FUNÇÃO DE PROCESSAMENTO DE DADOS
-# =============================================================================
-def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
+def processar_dados():
     """
-    Processa o DataFrame garantindo que as colunas A a E sejam tratadas
-    como strings (texto alfanumérico) antes de qualquer manipulação.
-    Calcula as colunas J a O com base nas colunas F a I.
+    Processa o DataFrame de conciliação calculando as colunas J a O.
+    As colunas calculadas dependem das colunas A-I previamente carregadas.
     """
-    df = df.copy()
+    df = st.session_state.df_conciliacao
 
-    # Garantir que as colunas alfanuméricas sejam strings
-    for col in COLUNAS_ALFANUMERICAS:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-            # Substituir valores 'nan', 'None', 'NaN' por string vazia
-            df[col] = df[col].replace(["nan", "None", "NaN", "NaT"], "")
+    if df is None or df.empty:
+        return
 
-    # Garantir que as colunas numéricas sejam float
-    for col in COLUNAS_NUMERICAS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    colunas = list(df.columns)
 
-    # =====================================================================
-    # LÓGICA DE CÁLCULO — COLUNAS J A O
-    # =====================================================================
-    # J = F + G
-    df["J"] = df["F"] + df["G"]
+    # Mapeia as colunas A-I por posição (índices 0 a 8)
+    if len(colunas) < 9:
+        st.warning("O arquivo enviado não possui colunas suficientes (A até I) para processamento.")
+        return
 
-    # K = H - I
-    df["K"] = df["H"] - df["I"]
+    col_a = colunas[0]
+    col_b = colunas[1]
+    col_c = colunas[2]
+    col_d = colunas[3]
+    col_e = colunas[4]
+    col_f = colunas[5]
+    col_g = colunas[6]
+    col_h = colunas[7]
+    col_i = colunas[8]
 
-    # L = J - K
-    df["L"] = df["J"] - df["K"]
+    # J: Diferença entre F e G
+    df[colunas[8 + 1] if len(colunas) > 9 else "J_Diferenca_F_G"] = (
+        pd.to_numeric(df[col_f], errors="coerce") - pd.to_numeric(df[col_g], errors="coerce")
+    ) if len(colunas) <= 9 else df[colunas[9]]
 
-    # M = F * 0.10 (exemplo: 10% sobre F)
-    df["M"] = df["F"] * 0.10
+    # Garante nomes estáveis para as colunas calculadas J a O
+    nomes_calculados = {
+        "J_Diferenca_F_G": pd.to_numeric(df[col_f], errors="coerce") - pd.to_numeric(df[col_g], errors="coerce"),
+        "K_Soma_H_I": pd.to_numeric(df[col_h], errors="coerce") + pd.to_numeric(df[col_i], errors="coerce"),
+        "L_Status": np.where(
+            (pd.to_numeric(df[col_f], errors="coerce") - pd.to_numeric(df[col_g], errors="coerce")).abs() < 0.01,
+            "Conciliado",
+            "Divergente",
+        ),
+        "M_Valor_Absoluto": (pd.to_numeric(df[col_f], errors="coerce") - pd.to_numeric(df[col_g], errors="coerce")).abs(),
+        "N_Indicador": np.where(pd.to_numeric(df[col_f], errors="coerce") > 0, "Positivo", "Negativo"),
+        "O_Observacao": "",
+    }
 
-    # N = L + M
-    df["N"] = df["L"] + df["M"]
+    for nome, valor in nomes_calculados.items():
+        df[nome] = valor
 
-    # O = N / (J + 1) (evita divisão por zero)
-    df["O"] = np.where(df["J"] + 1 != 0, df["N"] / (df["J"] + 1), 0.0)
+    st.session_state.df_conciliacao = df
 
-    # Arredondar colunas calculadas para 2 casas decimais
-    for col in COLUNAS_CALCULADAS:
-        df[col] = df[col].round(2)
+
+def converter_tipos(df):
+    """
+    Converte as colunas A-E para string e as colunas F-I para numérico.
+    """
+    if df is None or df.empty:
+        return df
+
+    colunas = list(df.columns)
+
+    # Colunas A-E (índices 0 a 4) -> string
+    for idx in range(min(5, len(colunas))):
+        df[colunas[idx]] = df[colunas[idx]].astype(str).str.strip()
+
+    # Colunas F-I (índices 5 a 8) -> numérico
+    for idx in range(5, min(9, len(colunas))):
+        df[colunas[idx]] = pd.to_numeric(df[colunas[idx]], errors="coerce")
 
     return df
 
-# =============================================================================
-# UPLOAD DE ARQUIVO (OPCIONAL)
-# =============================================================================
-st.subheader("📂 Importar Dados")
-arquivo = st.file_uploader(
-    "Carregar arquivo Excel ou CSV (opcional)",
-    type=["xlsx", "xls", "csv"],
-    key=f"uploader_{ano_selecionado}_{mes_selecionado}",
-)
 
-if arquivo is not None:
-    try:
-        if arquivo.name.endswith(".csv"):
-            df_importado = pd.read_csv(arquivo, dtype=str)
-        else:
-            df_importado = pd.read_excel(arquivo, dtype=str)
+def carregar_arquivo(arquivo):
+    """
+    Lê o arquivo enviado (Excel ou CSV) e retorna um DataFrame.
+    """
+    nome = arquivo.name.lower()
 
-        # Mapear colunas existentes para o formato esperado
-        for col in TODAS_COLUNAS:
-            if col not in df_importado.columns:
-                df_importado[col] = "" if col in COLUNAS_ALFANUMERICAS else 0.0
+    if nome.endswith(".csv"):
+        # Tenta diferentes separadores comuns
+        try:
+            df = pd.read_csv(arquivo, sep=";", encoding="utf-8")
+        except Exception:
+            arquivo.seek(0)
+            df = pd.read_csv(arquivo, sep=",", encoding="utf-8")
+    elif nome.endswith(".xlsx") or nome.endswith(".xls"):
+        df = pd.read_excel(arquivo)
+    else:
+        st.error("Formato de arquivo não suportado. Envie um arquivo .csv, .xlsx ou .xls")
+        return None
 
-        df_importado = df_importado[TODAS_COLUNAS]
-        st.session_state.df_conciliacao = df_importado
-        st.success(f"Arquivo '{arquivo.name}' carregado com sucesso!")
-    except Exception as e:
-        st.error(f"Erro ao carregar o arquivo: {e}")
+    return df
 
-# =============================================================================
-# EDITOR DE DADOS — st.data_editor
-# =============================================================================
-st.subheader(f"📝 Tabela de Conciliação — {meses_disponiveis[mes_selecionado]} / {ano_selecionado}")
 
-# Construir a configuração de colunas para o data_editor
-column_config_dict = {}
+def main():
+    st.set_page_config(page_title="Conciliação Bradesco", layout="wide")
+    st.title("Conciliação Bradesco")
 
-# Colunas A a E como TextColumn (alfanumérico)
-for col in COLUNAS_ALFANUMERICAS:
-    column_config_dict[col] = st.column_config.TextColumn(
-        label=st.session_state.aliases.get(col, col),
-        help=f"Digite valores alfanuméricos (texto) para a coluna {col}",
-        width="medium",
+    inicializar_session_state()
+
+    # Upload do arquivo
+    st.subheader("Upload do arquivo de conciliação")
+    arquivo = st.file_uploader(
+        "Selecione um arquivo Excel ou CSV",
+        type=["csv", "xlsx", "xls"],
+        key="upload_conciliacao",
     )
 
-# Colunas F a I como NumberColumn
-for col in COLUNAS_NUMERICAS:
-    column_config_dict[col] = st.column_config.NumberColumn(
-        label=st.session_state.aliases.get(col, col),
-        help=f"Valores numéricos para a coluna {col}",
-        format="%.2f",
-        width="medium",
-    )
+    if arquivo is not None:
+        try:
+            df = carregar_arquivo(arquivo)
 
-# Colunas J a O como NumberColumn (somente leitura — calculadas)
-for col in COLUNAS_CALCULADAS:
-    column_config_dict[col] = st.column_config.NumberColumn(
-        label=st.session_state.aliases.get(col, col),
-        help=f"Coluna calculada automaticamente ({col})",
-        format="%.2f",
-        width="medium",
-        disabled=True,
-    )
+            if df is not None and not df.empty:
+                # 1. Converte os tipos imediatamente após a leitura
+                df = converter_tipos(df)
 
-# Exibir o data_editor
-df_editado = st.data_editor(
-    st.session_state.df_conciliacao,
-    column_config=column_config_dict,
-    num_rows="dynamic",
-    use_container_width=True,
-    key=f"editor_{ano_selecionado}_{mes_selecionado}",
-    hide_index=False,
-)
+                # 2. Salva o DataFrame no session_state
+                st.session_state.df_conciliacao = df
 
-# Atualizar o DataFrame no session_state com as edições
-st.session_state.df_conciliacao = df_editado
+                # 3. Processa as colunas calculadas (J a O)
+                processar_dados()
 
-# =============================================================================
-# PROCESSAR E EXIBIR RESULTADOS
-# =============================================================================
-st.subheader("📊 Resultado Processado")
+                st.success("Arquivo carregado e processado com sucesso!")
+            else:
+                st.warning("O arquivo enviado está vazio ou não pôde ser lido.")
+        except Exception as e:
+            st.error(f"Erro ao processar o arquivo: {e}")
 
-df_processado = processar_dados(st.session_state.df_conciliacao)
+    # Tabela editável utilizando o session_state como fonte de dados
+    st.subheader("Tabela editável de conciliação")
 
-# Exibir o DataFrame processado (somente leitura)
-st.dataframe(
-    df_processado,
-    use_container_width=True,
-    hide_index=False,
-    column_config={
-        col: st.column_config.TextColumn(
-            label=st.session_state.aliases.get(col, col),
+    if not st.session_state.df_conciliacao.empty:
+        st.data_editor(
+            st.session_state.df_conciliacao,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_conciliacao",
         )
-        for col in COLUNAS_ALFANUMERICAS
-    },
-)
+    else:
+        st.info("Nenhum dado carregado. Envie um arquivo para visualizar a conciliação.")
 
-# =============================================================================
-# EXPORTAÇÃO
-# =============================================================================
-st.subheader("💾 Exportar")
 
-col_exp1, col_exp2 = st.columns(2)
-
-with col_exp1:
-    if st.button("📥 Exportar para Excel"):
-        try:
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df_processado.to_excel(writer, index=False, sheet_name=f"{mes_selecionado}_{ano_selecionado}")
-            output.seek(0)
-            st.download_button(
-                label="Baixar Excel",
-                data=output,
-                file_name=f"conciliacao_bradesco_{mes_selecionado}_{ano_selecionado}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        except Exception as e:
-            st.error(f"Erro ao exportar: {e}")
-
-with col_exp2:
-    if st.button("📥 Exportar para CSV"):
-        try:
-            csv_data = df_processado.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Baixar CSV",
-                data=csv_data,
-                file_name=f"conciliacao_bradesco_{mes_selecionado}_{ano_selecionado}.csv",
-                mime="text/csv",
-            )
-        except Exception as e:
-            st.error(f"Erro ao exportar: {e}")
-
-# =============================================================================
-# RODAPÉ
-# =============================================================================
-st.markdown("---")
-st.caption("Sistema de Conciliação Bradesco — Colunas A a E aceitam valores alfanuméricos.")
+if __name__ == "__main__":
+    main()
