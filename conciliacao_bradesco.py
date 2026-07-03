@@ -71,12 +71,14 @@ MESES = [
 ANOS = list(range(2020, 2031))
 
 # -----------------------------------------------------------------------------
-# Mapeamento explícito de sinônimos comuns para colunas cadastrais
+# Mapeamento de sinônimos para colunas cadastrais
 # -----------------------------------------------------------------------------
 SINONIMOS = {
-    "Cartão": ["cartao", "numero", "n_cartao", "card", "numero_cartao"],
-    "Titular": ["titular", "nome", "cliente", "nome_cliente", "owner"],
-    "CPF": ["cpf", "documento", "doc"],
+    "Cartão": ["cartao", "cartão", "numero", "número", "n_cartao", "n_cartão",
+               "card", "numero_cartao", "número_cartao", "n_do_cartao", "n_do_cartão"],
+    "Titular": ["titular", "nome", "cliente", "nome_cliente", "owner",
+                "nome_do_titular"],
+    "CPF": ["cpf", "documento", "doc", "cpf_cnpj"],
 }
 
 # -----------------------------------------------------------------------------
@@ -107,37 +109,40 @@ def obter_periodo_atual(mes: str, ano: int) -> pd.DataFrame:
     return st.session_state.periodos[chave]
 
 
-def _limpar_cartao(valor) -> str:
-    """Converte o valor de Cartão para string removendo '.0' residual."""
-    if pd.isna(valor):
+def _normalizar_cartao(valor) -> str:
+    """Converte o valor de Cartão para string, removendo sufixo '.0' de floats."""
+    if valor is None:
         return ""
+    if isinstance(valor, float) and not np.isnan(valor):
+        # Inteiro lido como float -> remove o '.0'
+        if float(valor).is_integer():
+            return str(int(valor))
+        return str(valor)
+    if isinstance(valor, (int, np.integer)):
+        return str(int(valor))
     texto = str(valor).strip()
-    # Remove sufixo .0 de conversões automáticas do pandas (ex.: 1234567.0)
+    # Remove sufixo '.0' caso exista (ex.: '12345.0' -> '12345')
     if texto.endswith(".0"):
         texto = texto[:-2]
     return texto
 
 
 def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
-    """Garante que o DataFrame importado tenha exatamente as colunas A-O.
-
-    Etapas:
-      1) Mapeia sinônimos comuns (Cartão, Titular, CPF) e apelidos configurados.
-      2) Garante todas as colunas A-O.
-      3) Converte Cartão para string removendo '.0' residual.
-      4) Extrai os 7 dígitos (Coluna B) imediatamente após normalizar a Coluna A.
-      5) Trata conversão numérica individualmente para as colunas J-O.
-    """
+    """Garante que o DataFrame importado tenha exatamente as colunas A-O."""
     df = df_import.copy()
 
-    # --- Mapeamento flexível: apelidos configurados + nomes canônicos ---
+    # Visualização de depuração: colunas encontradas no arquivo original
+    st.write("### 🔍 Colunas encontradas no arquivo original")
+    st.write(list(df.columns))
+
+    # Mapeamento flexível: tenta casar nomes/apelidos
     mapa = {v.lower(): k for k, v in st.session_state.apelidos.items()}
     mapa.update({k.lower(): k for k in COLUNAS})
 
-    # --- Mapeamento explícito de sinônimos comuns ---
-    for col_canonica, sinonimos in SINONIMOS.items():
+    # Adiciona mapeamento de sinônimos mais abrangente
+    for col_alvo, sinonimos in SINONIMOS.items():
         for sin in sinonimos:
-            mapa[sin.lower()] = col_canonica
+            mapa[sin.lower()] = col_alvo
 
     novas_colunas = {}
     for col in df.columns:
@@ -148,32 +153,22 @@ def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
     if novas_colunas:
         df = df.rename(columns=novas_colunas)
 
-    # --- Garante todas as colunas A-O ---
+    # Garante todas as colunas A-O
     for col in COLUNAS:
         if col not in df.columns:
             df[col] = np.nan
 
     df = df[COLUNAS]
 
-    # --- Conversão individual de tipos ---
-    # Coluna A (Cartão): string sem '.0' residual
-    df["Cartão"] = df["Cartão"].apply(_limpar_cartao)
-
-    # Coluna B (Resumo 7 dígitos): extração imediata a partir de Cartão
-    df["Resumo 7 dígitos"] = (
-        df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
-    )
-
-    # Colunas C (Titular) e D (CPF): string
-    df["Titular"] = df["Titular"].astype(str).replace({"nan": "", "None": ""}).str.strip()
-    df["CPF"] = df["CPF"].astype(str).replace({"nan": "", "None": ""}).str.strip()
-
-    # Coluna E (Localidade): string
-    df["Localidade"] = df["Localidade"].astype(str).replace({"nan": "", "None": ""}).str.strip()
-
-    # Colunas numéricas (F, G-O): cast numérico + fill 0.0
+    # Cast numérico + fill 0.0 (tratamento individual por coluna)
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+
+    # Força a coluna 'Cartão' a ser string e remove sufixo '.0'
+    df["Cartão"] = df["Cartão"].apply(_normalizar_cartao)
+
+    # Recalcula 'Resumo 7 dígitos' IMEDIATAMENTE após normalizar 'Cartão'
+    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
     return df.reset_index(drop=True)
 
@@ -306,18 +301,11 @@ with col_imp2:
 
 if btn_importar and arquivo is not None:
     try:
-        # Leitura bruta sem dtype=str global para evitar conflitos em formatos mistos.
-        # A conversão de tipos é tratada individualmente em normalizar_dataframe_importado.
+        # Leitura SEM dtype=str global; conversão tratada por coluna na normalização
         if arquivo.name.lower().endswith(".csv"):
             df_import = pd.read_csv(arquivo)
         else:
             df_import = pd.read_excel(arquivo)
-
-        # Tabela temporária: mostra exatamente como o pandas está lendo as colunas
-        # originais antes de qualquer processamento.
-        st.write("### 📋 Pré-visualização bruta (como o pandas leu o arquivo)")
-        st.dataframe(df_import.head(20), use_container_width=True)
-        st.write(f"Colunas detectadas: {list(df_import.columns)}")
 
         df_norm = normalizar_dataframe_importado(df_import)
         df_norm = recalcular(df_norm)
