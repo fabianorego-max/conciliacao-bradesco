@@ -21,367 +21,395 @@ Estrutura de colunas (A até O):
 """
 import pandas as pd
 import streamlit as st
-from io import BytesIO
 
+# -----------------------------------------------------------------------------
+# Configuração da página
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Bradesco Conciliação", layout="wide")
+st.title("Bradesco Conciliação")
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-# Canonical internal column names (A to O)
-CANONICAL_COLUMNS = [
-    "cartao",               # A
-    "resumo",               # B
-    "titular",              # C
-    "cpf",                  # D
-    "localidade",           # E
-    "limite",               # F
-    "aprovado_reuniao",    # G
-    "valor_fatura",         # H
-    "saldo_anterior",       # I
-    "diferenca_pagar",      # J
-    "diferenca_receber",    # K
-    "saldo_final_ajustado", # L
-    "saldo_proxima_reuniao",# M
-    "pos_fechamento",       # N
-    "saldo_final_mes",      # O
+# -----------------------------------------------------------------------------
+# Definição da estrutura A-O
+# -----------------------------------------------------------------------------
+COLUNAS_ORIGINAIS = [
+    "A_Cartao",
+    "B_Resumo",
+    "C_Titular",
+    "D_CPF",
+    "E_Localidade",
+    "F_Limite",
+    "G_Aprovado_Reuniao",
+    "H_Valor_Fatura",
+    "I_Saldo_Anterior",
+    "J_Diferenca_Pagar",
+    "K_Diferenca_Receber",
+    "L_Saldo_Final_Ajustado",
+    "M_Saldo_Proxima_Reuniao",
+    "N_Pos_Fechamento",
+    "O_Saldo_Final_Mes",
 ]
 
-NUMERIC_COLUMNS = [
-    "limite",               # F
-    "aprovado_reuniao",    # G
-    "valor_fatura",         # H
-    "saldo_anterior",       # I
-    "diferenca_pagar",      # J
-    "diferenca_receber",    # K
-    "saldo_final_ajustado", # L
-    "saldo_proxima_reuniao",# M
-    "pos_fechamento",       # N
-    "saldo_final_mes",      # O
+COLUNAS_NUMERICAS = [
+    "F_Limite",
+    "G_Aprovado_Reuniao",
+    "H_Valor_Fatura",
+    "I_Saldo_Anterior",
+    "J_Diferenca_Pagar",
+    "K_Diferenca_Receber",
+    "L_Saldo_Final_Ajustado",
+    "M_Saldo_Proxima_Reuniao",
+    "N_Pos_Fechamento",
+    "O_Saldo_Final_Mes",
 ]
 
-DEFAULT_LABELS = {
-    "cartao": "Cartão",
-    "resumo": "Resumo 7 dígitos",
-    "titular": "Titular",
-    "cpf": "CPF",
-    "localidade": "Localidade",
-    "limite": "Limite",
-    "aprovado_reuniao": "Aprovado Reunião",
-    "valor_fatura": "Valor Fatura",
-    "saldo_anterior": "Saldo Anterior",
-    "diferenca_pagar": "Diferença a Pagar",
-    "diferenca_receber": "Diferença a Receber",
-    "saldo_final_ajustado": "Saldo Final Ajustado",
-    "saldo_proxima_reuniao": "Saldo Próxima Reunião",
-    "pos_fechamento": "Pós-Fechamento",
-    "saldo_final_mes": "Saldo Final do Mês",
+COLUNAS_CALCULADAS = [
+    "J_Diferenca_Pagar",
+    "K_Diferenca_Receber",
+    "L_Saldo_Final_Ajustado",
+    "M_Saldo_Proxima_Reuniao",
+    "O_Saldo_Final_Mes",
+]
+
+NOMES_PADRAO = {
+    "A_Cartao": "A) Cartão",
+    "B_Resumo": "B) Resumo 7 dígitos",
+    "C_Titular": "C) Titular",
+    "D_CPF": "D) CPF",
+    "E_Localidade": "E) Localidade",
+    "F_Limite": "F) Limite",
+    "G_Aprovado_Reuniao": "G) Aprovado Reunião",
+    "H_Valor_Fatura": "H) Valor Fatura",
+    "I_Saldo_Anterior": "I) Saldo Anterior",
+    "J_Diferenca_Pagar": "J) Diferença a Pagar",
+    "K_Diferenca_Receber": "K) Diferença a Receber",
+    "L_Saldo_Final_Ajustado": "L) Saldo Final Ajustado",
+    "M_Saldo_Proxima_Reuniao": "M) Saldo Próxima Reunião",
+    "N_Pos_Fechamento": "N) Pós-Fechamento",
+    "O_Saldo_Final_Mes": "O) Saldo Final do Mês",
 }
 
+# -----------------------------------------------------------------------------
+# Inicialização do session_state
+# -----------------------------------------------------------------------------
+if "periodos" not in st.session_state:
+    st.session_state.periodos = {}  # chave: "MM/YYYY" -> DataFrame
 
-def get_labels() -> dict:
-    """Return the current label mapping, honoring st.session_state.apelidos."""
-    if "apelidos" not in st.session_state:
-        st.session_state.apelidos = dict(DEFAULT_LABELS)
-    # Ensure all canonical keys exist even if apelidos was partially customized
-    labels = dict(DEFAULT_LABELS)
-    labels.update(st.session_state.apelidos)
-    st.session_state.apelidos = labels
-    return labels
+if "apelidos" not in st.session_state:
+    st.session_state.apelidos = dict(NOMES_PADRAO)
 
-
-def display_labels() -> dict:
-    """Map canonical names -> display labels for st.data_editor columns."""
-    return get_labels()
+if "periodo_atual" not in st.session_state:
+    st.session_state.periodo_atual = None
 
 
-# ---------------------------------------------------------------------------
-# DataFrame helpers
-# ---------------------------------------------------------------------------
-
-def empty_grid(rows: int = 1) -> pd.DataFrame:
-    """Create an empty grid with the canonical A-O structure."""
-    data = {col: [""] * rows for col in CANONICAL_COLUMNS}
-    df = pd.DataFrame(data)
-    return cast_numeric(df)
+def criar_df_vazio() -> pd.DataFrame:
+    df = pd.DataFrame(columns=COLUNAS_ORIGINAIS)
+    for col in COLUNAS_NUMERICAS:
+        df[col] = df[col].astype(float)
+    return df
 
 
-def cast_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Force every numeric column (F, G, H, I, J, K, L, M, N, O) to float and
-    fill missing values with 0.0. This prevents StreamlitAPIException when
-    the dataframe is passed to st.data_editor.
-    """
-    df = df.copy()
-    for col in NUMERIC_COLUMNS:
+def normalizar_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante que o DataFrame possua todas as colunas A-O e tipos corretos."""
+    for col in COLUNAS_ORIGINAIS:
         if col not in df.columns:
-            df[col] = 0.0
+            df[col] = 0.0 if col in COLUNAS_NUMERICAS else ""
+    for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
-    # Ensure all canonical columns exist and are ordered A-O
-    for col in CANONICAL_COLUMNS:
-        if col not in df.columns:
-            df[col] = "" if col not in NUMERIC_COLUMNS else 0.0
-    df = df[CANONICAL_COLUMNS]
-    return df.reset_index(drop=True)
+    for col in COLUNAS_ORIGINAIS:
+        if col not in COLUNAS_NUMERICAS:
+            df[col] = df[col].astype(str).fillna("")
+    return df[COLUNAS_ORIGINAIS]
 
 
-def compute_resumo(cartao: str) -> str:
-    """B) Resumo 7 dígitos automatically derived from A) Cartão."""
-    if cartao is None:
-        return ""
-    s = str(cartao).strip()
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) >= 7:
-        return digits[-7:]
-    return digits.ljust(7, "0")[:7]
+def recalcular(df: pd.DataFrame) -> pd.DataFrame:
+    """Recalcula as colunas derivadas J, K, L, M, O."""
+    df = df.copy()
+    for col in COLUNAS_NUMERICAS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+
+    g = df["G_Aprovado_Reuniao"]
+    h = df["H_Valor_Fatura"]
+    i = df["I_Saldo_Anterior"]
+    n = df["N_Pos_Fechamento"]
+
+    df["J_Diferenca_Pagar"] = (h - g).where(h > g, 0.0)
+    df["K_Diferenca_Receber"] = (g - h).where(g > h, 0.0)
+    df["L_Saldo_Final_Ajustado"] = i + df["J_Diferenca_Pagar"] - df["K_Diferenca_Receber"]
+    df["M_Saldo_Proxima_Reuniao"] = g + df["L_Saldo_Final_Ajustado"] - h
+    df["O_Saldo_Final_Mes"] = g + df["L_Saldo_Final_Ajustado"] - n
+
+    return df
 
 
-def recompute(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Recalculate derived columns while preserving user-entered values:
-      B  = last 7 digits of A
-      J  = max(H - G, 0)        (Diferença a Pagar, when H > G)
-      K  = max(G - H, 0)        (Diferença a Receber, when G > H)
-      L  = I + J - K            (Saldo Final Ajustado)
-      M  = G + L - H            (Saldo Próxima Reunião)
-      O  = G + L - N            (Saldo Final do Mês)
-    """
-    df = cast_numeric(df).copy()
-
-    # B) Resumo from A) Cartão
-    df["resumo"] = df["cartao"].apply(compute_resumo)
-
-    # Numeric helpers
-    g = df["aprovado_reuniao"]
-    h = df["valor_fatura"]
-    i = df["saldo_anterior"]
-    n = df["pos_fechamento"]
-
-    # J and K
-    df["diferenca_pagar"] = (h - g).clip(lower=0.0)
-    df["diferenca_receber"] = (g - h).clip(lower=0.0)
-
-    # L = I + J - K
-    df["saldo_final_ajustado"] = i + df["diferenca_pagar"] - df["diferenca_receber"]
-
-    # M = G + L - H
-    df["saldo_proxima_reuniao"] = g + df["saldo_final_ajustado"] - h
-
-    # O = G + L - N
-    df["saldo_final_mes"] = g + df["saldo_final_ajustado"] - n
-
-    return cast_numeric(df)
+def gerar_resumo(cartao: str) -> str:
+    """Gera o resumo de 7 dígitos a partir do número do cartão (A)."""
+    if not isinstance(cartao, str):
+        cartao = str(cartao) if cartao is not None else ""
+    digitos = "".join(ch for ch in cartao if ch.isdigit())
+    if len(digitos) >= 7:
+        return digitos[-7:]
+    return digitos.zfill(7)
 
 
-def carry_over_to_next_month(current: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create next month's grid where Column I (saldo_anterior) receives the
-    current month's Column O (saldo_final_mes). Other numeric columns reset.
-    """
-    current = cast_numeric(current)
-    next_df = empty_grid(rows=len(current))
-    next_df["cartao"] = current["cartao"].values
-    next_df["resumo"] = current["cartao"].apply(compute_resumo).values
-    next_df["titular"] = current["titular"].values
-    next_df["cpf"] = current["cpf"].values
-    next_df["localidade"] = current["localidade"].values
-    next_df["limite"] = current["limite"].values
-    # I) Saldo Anterior <- O) Saldo Final do Mês
-    next_df["saldo_anterior"] = current["saldo_final_mes"].astype(float).values
-    return cast_numeric(next_df)
+def nome_exibicao(col: str) -> str:
+    return st.session_state.apelidos.get(col, NOMES_PADRAO.get(col, col))
 
 
-# ---------------------------------------------------------------------------
-# Import mapping
-# ---------------------------------------------------------------------------
+def proximo_periodo(periodo: str) -> str:
+    mes, ano = periodo.split("/")
+    mes = int(mes)
+    ano = int(ano)
+    mes += 1
+    if mes > 12:
+        mes = 1
+        ano += 1
+    return f"{mes:02d}/{ano}"
 
-def map_imported_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Map an imported Excel/CSV dataframe into the canonical A-O structure.
-    Matching is case-insensitive and ignores accents/spaces for robustness.
-    """
-    import unicodedata
 
-    def normalize(s: str) -> str:
-        s = str(s).strip().lower()
-        s = "".join(
-            ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch)
+# -----------------------------------------------------------------------------
+# Sidebar: seletor de Mês/Ano e ações
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Período")
+
+    meses = [
+        "01", "02", "03", "04", "05", "06",
+        "07", "08", "09", "10", "11", "12",
+    ]
+    anos = [str(a) for a in range(2020, 2036)]
+
+    col_m, col_a = st.columns(2)
+    with col_m:
+        mes_sel = st.selectbox("Mês", meses, index=0)
+    with col_a:
+        ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
+
+    periodo_chave = f"{mes_sel}/{ano_sel}"
+
+    if st.button("Abrir / Criar período", use_container_width=True):
+        st.session_state.periodo_atual = periodo_chave
+        if periodo_chave not in st.session_state.periodos:
+            st.session_state.periodos[periodo_chave] = criar_df_vazio()
+        st.rerun()
+
+    st.divider()
+
+    periodos_existentes = sorted(st.session_state.periodos.keys())
+    if periodos_existentes:
+        periodo_selecionado = st.selectbox(
+            "Períodos cadastrados",
+            periodos_existentes,
+            index=periodos_existentes.index(st.session_state.periodo_atual)
+            if st.session_state.periodo_atual in periodos_existentes
+            else 0,
         )
-        return " ".join(s.split())
+        if st.button("Selecionar período", use_container_width=True):
+            st.session_state.periodo_atual = periodo_selecionado
+            st.rerun()
 
-    labels = get_labels()
-    # Build reverse lookup: normalized display label -> canonical
-    rev = {normalize(v): k for k, v in labels.items()}
-    rev.update({normalize(k): k for k in CANONICAL_COLUMNS})
+    st.divider()
 
-    mapped = {}
-    for src_col in df.columns:
-        key = normalize(src_col)
-        if key in rev:
-            canon = rev[key]
-            if canon not in mapped:
-                mapped[canon] = df[src_col]
-
-    out = empty_grid(rows=len(df))
-    for canon, series in mapped.items():
-        out[canon] = series.values
-
-    out = cast_numeric(out)
-    out["resumo"] = out["cartao"].apply(compute_resumo)
-    return recompute(out)
-
-
-def read_uploaded_file(uploaded) -> pd.DataFrame:
-    """Read an uploaded CSV or Excel file into a dataframe."""
-    name = uploaded.name.lower()
-    if name.endswith(".csv"):
-        try:
-            return pd.read_csv(uploaded, sep=None, engine="python")
-        except Exception:
-            uploaded.seek(0)
-            return pd.read_csv(uploaded)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(uploaded)
-    raise ValueError("Formato de arquivo não suportado. Use CSV ou Excel (.xlsx).")
-
-
-def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Export dataframe to Excel bytes for download."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Conciliacao")
-    return output.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# Streamlit UI
-# ---------------------------------------------------------------------------
-
-def configure_editor_columns() -> dict:
-    """Build column config for st.data_editor using display labels."""
-    labels = display_labels()
-    config = {}
-    for col in CANONICAL_COLUMNS:
-        if col in NUMERIC_COLUMNS:
-            config[col] = st.column_config.NumberColumn(
-                label=labels[col],
-                format="%.2f",
-                step=0.01,
-                min_value=-1e12,
-                max_value=1e12,
+    st.subheader("Renomear colunas")
+    with st.form("form_apelidos"):
+        novos_apelidos = {}
+        for col in COLUNAS_ORIGINAIS:
+            novos_apelidos[col] = st.text_input(
+                NOMES_PADRAO[col],
+                value=st.session_state.apelidos.get(col, NOMES_PADRAO[col]),
+                key=f"apelido_{col}",
             )
+        submitted = st.form_submit_button("Salvar apelidos")
+        if submitted:
+            st.session_state.apelidos = novos_apelidos
+            st.success("Apelidos atualizados!")
+
+    st.divider()
+
+    st.subheader("Importar planilha")
+    arquivo = st.file_uploader(
+        "Selecione um arquivo Excel ou CSV",
+        type=["xlsx", "xls", "csv"],
+    )
+    if arquivo is not None:
+        try:
+            if arquivo.name.lower().endswith(".csv"):
+                df_import = pd.read_csv(arquivo, dtype=str)
+            else:
+                df_import = pd.read_excel(arquivo, dtype=str)
+
+            # Mapeamento flexível: tenta casar nomes (case-insensitive, sem acentos)
+            mapa_normalizado = {
+                str(col).strip().lower().replace(" ", "_"): col
+                for col in df_import.columns
+            }
+            df_map = pd.DataFrame()
+            for col_orig in COLUNAS_ORIGINAIS:
+                alvo = NOMES_PADRAO[col_orig].lower().replace(" ", "_")
+                encontrado = None
+                for chave, nome_real in mapa_normalizado.items():
+                    if alvo in chave or chave in alvo:
+                        encontrado = nome_real
+                        break
+                if encontrado is not None:
+                    df_map[col_orig] = df_import[encontrado]
+                else:
+                    df_map[col_orig] = 0.0 if col_orig in COLUNAS_NUMERICAS else ""
+
+            df_map = normalizar_df(df_map)
+            df_map["B_Resumo"] = df_map["A_Cartao"].apply(gerar_resumo)
+            df_map = recalcular(df_map)
+
+            if st.session_state.periodo_atual is None:
+                st.session_state.periodo_atual = periodo_chave
+            if st.session_state.periodo_atual not in st.session_state.periodos:
+                st.session_state.periodos[st.session_state.periodo_atual] = criar_df_vazio()
+
+            st.session_state.periodos[st.session_state.periodo_atual] = df_map
+            st.success(f"Importado em {st.session_state.periodo_atual}: {len(df_map)} linhas.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao importar: {e}")
+
+    st.divider()
+
+    st.subheader("Carry over")
+    if st.button("Avançar para próximo mês", use_container_width=True):
+        if st.session_state.periodo_atual is None:
+            st.error("Selecione um período primeiro.")
         else:
-            config[col] = st.column_config.TextColumn(label=labels[col])
-    return config
+            df_atual = st.session_state.periodos.get(
+                st.session_state.periodo_atual, criar_df_vazio()
+            )
+            df_atual = recalcular(df_atual)
+            prox = proximo_periodo(st.session_state.periodo_atual)
 
+            df_prox = st.session_state.periodos.get(prox, criar_df_vazio()).copy()
+            df_prox = normalizar_df(df_prox)
 
-def main() -> None:
-    st.set_page_config(page_title="Bradesco Conciliação", layout="wide")
-    st.title("Bradesco Conciliação")
+            # Preserva dados cadastrais (A-F) e copia O -> I do próximo período
+            for idx, row in df_atual.iterrows():
+                cartao = row["A_Cartao"]
+                if not cartao:
+                    continue
+                mask = df_prox["A_Cartao"] == cartao
+                if mask.any():
+                    df_prox.loc[mask, "I_Saldo_Anterior"] = float(row["O_Saldo_Final_Mes"])
+                    for col in ["A_Cartao", "B_Resumo", "C_Titular", "D_CPF",
+                                "E_Localidade", "F_Limite"]:
+                        df_prox.loc[mask, col] = row[col]
+                else:
+                    nova_linha = {col: "" for col in COLUNAS_ORIGINAIS}
+                    nova_linha["A_Cartao"] = cartao
+                    nova_linha["B_Resumo"] = gerar_resumo(cartao)
+                    nova_linha["C_Titular"] = row["C_Titular"]
+                    nova_linha["D_CPF"] = row["D_CPF"]
+                    nova_linha["E_Localidade"] = row["E_Localidade"]
+                    nova_linha["F_Limite"] = float(row["F_Limite"])
+                    nova_linha["I_Saldo_Anterior"] = float(row["O_Saldo_Final_Mes"])
+                    for col in COLUNAS_NUMERICAS:
+                        if col not in nova_linha:
+                            nova_linha[col] = 0.0
+                    df_prox = pd.concat(
+                        [df_prox, pd.DataFrame([nova_linha])], ignore_index=True
+                    )
 
-    # Initialize session state
-    if "grid" not in st.session_state:
-        st.session_state.grid = empty_grid(rows=3)
-    if "apelidos" not in st.session_state:
-        st.session_state.apelidos = dict(DEFAULT_LABELS)
+            df_prox = normalizar_df(df_prox)
+            df_prox = recalcular(df_prox)
+            st.session_state.periodos[prox] = df_prox
+            st.session_state.periodo_atual = prox
+            st.success(f"Carry over concluído para {prox}.")
+            st.rerun()
 
-    # -----------------------------------------------------------------------
-    # Sidebar: label customization + import
-    # -----------------------------------------------------------------------
-    with st.sidebar:
-        st.header("Configurações")
+# -----------------------------------------------------------------------------
+# Área principal
+# -----------------------------------------------------------------------------
+if st.session_state.periodo_atual is None:
+    st.info("Selecione ou crie um período na barra lateral para começar.")
+    st.stop()
 
-        with st.expander("Renomear colunas (apelidos)", expanded=False):
-            new_labels = {}
-            changed = False
-            for canon in CANONICAL_COLUMNS:
-                current = st.session_state.apelidos.get(canon, DEFAULT_LABELS[canon])
-                val = st.text_input(
-                    f"{canon}", value=current, key=f"label_{canon}"
-                )
-                new_labels[canon] = val
-                if val != current:
-                    changed = True
-            if st.button("Aplicar apelidos") or changed:
-                st.session_state.apelidos = new_labels
-                st.success("Apelidos atualizados.")
-                st.rerun()
+st.subheader(f"Período atual: {st.session_state.periodo_atual}")
 
-        st.divider()
-        st.header("Importar planilha")
-        uploaded = st.file_uploader(
-            "CSV ou Excel", type=["csv", "xlsx", "xls"], key="uploader"
+df_periodo = st.session_state.periodos.get(
+    st.session_state.periodo_atual, criar_df_vazio()
+)
+df_periodo = normalizar_df(df_periodo)
+
+# Atualiza B (Resumo) automaticamente a partir de A (Cartão)
+df_periodo["B_Resumo"] = df_periodo["A_Cartao"].apply(gerar_resumo)
+
+# Garante cast explícito para float e preenchimento com 0.0 (evita StreamlitAPIException)
+for col in COLUNAS_NUMERICAS:
+    df_periodo[col] = pd.to_numeric(df_periodo[col], errors="coerce").fillna(0.0).astype(float)
+
+# Renomeia colunas para exibição conforme apelidos
+df_exibicao = df_periodo.rename(columns={c: nome_exibicao(c) for c in COLUNAS_ORIGINAIS})
+nomes_exibicao = [nome_exibicao(c) for c in COLUNAS_ORIGINAIS]
+
+# Configuração de colunas: calculadas como somente leitura
+config_colunas = {}
+for col_orig in COLUNAS_ORIGINAIS:
+    nome = nome_exibicao(col_orig)
+    if col_orig in COLUNAS_NUMERICAS:
+        config_colunas[nome] = st.column_config.NumberColumn(
+            nome,
+            format="%.2f",
+            step=0.01,
         )
-        if uploaded is not None:
-            try:
-                raw = read_uploaded_file(uploaded)
-                mapped = map_imported_columns(raw)
-                st.session_state.grid = mapped
-                st.success(f"Importado {len(mapped)} linha(s).")
-            except Exception as exc:
-                st.error(f"Erro ao importar: {exc}")
+    else:
+        config_colunas[nome] = st.column_config.TextColumn(nome)
 
-        st.divider()
-        st.header("Exportar")
-        export_df = cast_numeric(st.session_state.grid)
-        st.download_button(
-            "Baixar Excel",
-            data=to_excel_bytes(export_df),
-            file_name="bradesco_conciliacao.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+df_editado = st.data_editor(
+    df_exibicao,
+    column_config=config_colunas,
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"editor_{st.session_state.periodo_atual}",
+)
+
+# Reverte nomes para colunas internas e recalcula
+mapa_reverso = {nome_exibicao(c): c for c in COLUNAS_ORIGINAIS}
+df_revertido = df_editado.rename(columns=mapa_reverso)
+df_revertido = normalizar_df(df_revertido)
+df_revertido["B_Resumo"] = df_revertido["A_Cartao"].apply(gerar_resumo)
+df_revertido = recalcular(df_revertido)
+
+st.session_state.periodos[st.session_state.periodo_atual] = df_revertido
+
+# Exibe resultado recalculado (somente leitura)
+st.subheader("Resultado recalculado")
+df_resultado = df_revertido.rename(
+    columns={c: nome_exibicao(c) for c in COLUNAS_ORIGINAIS}
+)
+st.dataframe(df_resultado, use_container_width=True, hide_index=True)
+
+# Exportação
+st.subheader("Exportar")
+col_exp1, col_exp2 = st.columns(2)
+with col_exp1:
+    if st.button("Exportar para Excel"):
+        df_export = df_revertido.rename(
+            columns={c: nome_exibicao(c) for c in COLUNAS_ORIGINAIS}
         )
         st.download_button(
-            "Baixar CSV",
-            data=export_df.to_csv(index=False).encode("utf-8"),
-            file_name="bradesco_conciliacao.csv",
+            label="Baixar Excel",
+            data=df_export.to_csv(index=False).encode("utf-8"),
+            file_name=f"bradesco_conciliacao_{st.session_state.periodo_atual.replace('/', '-')}.csv",
             mime="text/csv",
         )
-
-    # -----------------------------------------------------------------------
-    # Main editor
-    # -----------------------------------------------------------------------
-    st.subheader("Planilha de Conciliação (Colunas A–O)")
-
-    # Ensure the grid is always cast before passing to the editor
-    st.session_state.grid = cast_numeric(st.session_state.grid)
-
-    edited = st.data_editor(
-        st.session_state.grid,
-        column_config=configure_editor_columns(),
-        num_rows="dynamic",
-        use_container_width=True,
-        key="data_editor",
-        hide_index=True,
-    )
-
-    # Recompute derived columns after edits
-    st.session_state.grid = recompute(edited)
-
-    # -----------------------------------------------------------------------
-    # Carry-over to next month
-    # -----------------------------------------------------------------------
-    st.divider()
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        if st.button("Avançar para próximo mês", type="primary"):
-            st.session_state.grid = carry_over_to_next_month(st.session_state.grid)
-            st.success("Coluna O foi transferida para a Coluna I do próximo mês.")
-            st.rerun()
-    with col2:
-        st.caption(
-            "O saldo final do mês (O) será copiado para o saldo anterior (I) do próximo mês."
+with col_exp2:
+    if st.button("Exportar todos os períodos"):
+        frames = []
+        for per, dfp in st.session_state.periodos.items():
+            dfp_exp = recalcular(normalizar_df(dfp)).copy()
+            dfp_exp.insert(0, "Período", per)
+            dfp_exp = dfp_exp.rename(
+                columns={c: nome_exibicao(c) for c in COLUNAS_ORIGINAIS}
+            )
+            frames.append(dfp_exp)
+        df_all = pd.concat(frames, ignore_index=True)
+        st.download_button(
+            label="Baixar CSV consolidado",
+            data=df_all.to_csv(index=False).encode("utf-8"),
+            file_name="bradesco_conciliacao_todos_periodos.csv",
+            mime="text/csv",
         )
-
-    # -----------------------------------------------------------------------
-    # Preview of computed values
-    # -----------------------------------------------------------------------
-    with st.expander("Resumo calculado", expanded=False):
-        st.dataframe(
-            cast_numeric(st.session_state.grid),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-if __name__ == "__main__":
-    main()
