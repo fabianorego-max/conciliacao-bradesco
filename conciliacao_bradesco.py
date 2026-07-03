@@ -19,37 +19,56 @@ Estrutura de colunas (A até O):
   N) Pós-Fechamento    - Entrada manual
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
 
 # -----------------------------------------------------------------------------
 # Configuração da página
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Bradesco Conciliação", layout="wide")
+st.set_page_config(page_title="Conciliação Bradesco", layout="wide", page_icon="🏦")
 
 # -----------------------------------------------------------------------------
-# Apelidos (renomeação amigável das colunas A-O)
+# Constantes / Estrutura de colunas A-O
 # -----------------------------------------------------------------------------
-APELIDOS = {
-    "A": "Data",
-    "B": "Documento",
-    "C": "Histórico",
-    "D": "Débito",
-    "E": "Crédito",
-    "F": "Saldo Bancário",
-    "G": "Conciliado",
-    "H": "Observação",
-    "I": "Valor Conciliado",
-    "J": "Saldo Anterior",
-    "K": "Entradas",
-    "L": "Saídas",
-    "M": "Saldo Atual",
-    "N": "Diferença",
-    "O": "Status",
-}
+COLUNAS = [
+    "Cartão",               # A
+    "Resumo 7 dígitos",     # B (auto a partir de A)
+    "Titular",              # C
+    "CPF",                  # D
+    "Localidade",           # E
+    "Limite",               # F
+    "Aprovado Reunião",    # G
+    "Valor Fatura",        # H
+    "Saldo Anterior",      # I
+    "Diferença a Pagar",   # J (H>G)
+    "Diferença a Receber", # K (G>H)
+    "Saldo Final Ajustado",# L (I+J-K)
+    "Saldo Próxima Reunião",# M (G+L-H)
+    "Pós-Fechamento",      # N
+    "Saldo Final do Mês",  # O (G+L-N)
+]
 
-COLUNAS = list(APELIDOS.keys())
-COLUNAS_NUMERICAS = ["D", "E", "F", "I", "J", "K", "L", "M", "N"]
+COLUNAS_NUMERICAS = [
+    "Limite",
+    "Aprovado Reunião",
+    "Valor Fatura",
+    "Saldo Anterior",
+    "Diferença a Pagar",
+    "Diferença a Receber",
+    "Saldo Final Ajustado",
+    "Saldo Próxima Reunião",
+    "Pós-Fechamento",
+    "Saldo Final do Mês",
+]
+
+MESES = [
+    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+]
+
+ANOS = list(range(2020, 2031))
 
 # -----------------------------------------------------------------------------
 # Inicialização do session_state
@@ -57,278 +76,269 @@ COLUNAS_NUMERICAS = ["D", "E", "F", "I", "J", "K", "L", "M", "N"]
 if "periodos" not in st.session_state:
     st.session_state.periodos = {}
 
-if "periodo_atual" not in st.session_state:
-    st.session_state.periodo_atual = None
+if "apelidos" not in st.session_state:
+    st.session_state.apelidos = {col: col for col in COLUNAS}
 
 
-def garantir_periodo(periodo: str) -> None:
-    """Cria a estrutura base do período caso ainda não exista."""
-    if periodo not in st.session_state.periodos:
-        st.session_state.periodos[periodo] = criar_dataframe_vazio()
+def periodo_chave(mes: str, ano: int) -> str:
+    return f"{mes}_{ano}"
 
 
 def criar_dataframe_vazio() -> pd.DataFrame:
-    """Cria um DataFrame vazio com a estrutura A-O e tipos corretos."""
-    dados = {col: [] for col in COLUNAS}
-    df = pd.DataFrame(dados)
-    return normalizar_dataframe(df)
+    df = pd.DataFrame(columns=COLUNAS)
+    for col in COLUNAS_NUMERICAS:
+        df[col] = df[col].astype(float)
+    return df
 
 
-def normalizar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante que todas as colunas A-O existam, com tipos corretos."""
+def obter_periodo_atual(mes: str, ano: int) -> pd.DataFrame:
+    chave = periodo_chave(mes, ano)
+    if chave not in st.session_state.periodos:
+        st.session_state.periodos[chave] = criar_dataframe_vazio()
+    return st.session_state.periodos[chave]
+
+
+def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
+    """Garante que o DataFrame importado tenha exatamente as colunas A-O."""
+    df = df_import.copy()
+
+    # Mapeamento flexível: tenta casar nomes/apelidos
+    mapa = {v.lower(): k for k, v in st.session_state.apelidos.items()}
+    mapa.update({k.lower(): k for k in COLUNAS})
+
+    novas_colunas = {}
+    for col in df.columns:
+        chave = str(col).strip().lower()
+        if chave in mapa:
+            novas_colunas[col] = mapa[chave]
+
+    if novas_colunas:
+        df = df.rename(columns=novas_colunas)
+
+    # Garante todas as colunas A-O
     for col in COLUNAS:
         if col not in df.columns:
-            df[col] = 0.0 if col in COLUNAS_NUMERICAS else ""
+            df[col] = np.nan
 
-    # Reordenar para A-O
-    df = df[COLUNAS].copy()
+    df = df[COLUNAS]
 
-    # Cast numérico + fill 0.0 para evitar StreamlitAPIException
+    # Cast numérico + fill 0.0
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # Coluna G (Conciliado) como bool
-    df["G"] = (
-        df["G"].astype(str).str.lower().isin(["true", "1", "sim", "yes", "x"])
-        if df["G"].dtype != bool
-        else df["G"]
-    )
-    df["G"] = df["G"].fillna(False).astype(bool)
-
-    # Strings como texto seguro
-    for col in ["A", "B", "C", "H", "O"]:
-        df[col] = df[col].astype(str).replace("nan", "")
+    # Resumo 7 dígitos automático a partir de Cartão
+    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
     return df.reset_index(drop=True)
 
 
-def calcular_colunas(df: pd.DataFrame, saldo_anterior: float = 0.0) -> pd.DataFrame:
-    """Calcula J, K, L, M, N, O."""
+def recalcular(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica a lógica de cálculo das colunas J-O."""
     df = df.copy()
 
-    # J - Saldo Anterior (carry-over do período anterior)
-    df["J"] = float(saldo_anterior)
+    # Garante tipos numéricos
+    for col in COLUNAS_NUMERICAS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # K - Entradas (crédito acumulado)
-    df["K"] = df["E"].astype(float).cumsum()
+    # Resumo 7 dígitos automático
+    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
-    # L - Saídas (débito acumulado)
-    df["L"] = df["D"].astype(float).cumsum()
+    # J) Diferença a Pagar (H>G)
+    df["Diferença a Pagar"] = np.where(df["Valor Fatura"] > df["Aprovado Reunião"],
+                                        df["Valor Fatura"] - df["Aprovado Reunião"], 0.0)
 
-    # M - Saldo Atual = Saldo Anterior + Entradas - Saídas
-    df["M"] = df["J"] + df["K"] - df["L"]
+    # K) Diferença a Receber (G>H)
+    df["Diferença a Receber"] = np.where(df["Aprovado Reunião"] > df["Valor Fatura"],
+                                         df["Aprovado Reunião"] - df["Valor Fatura"], 0.0)
 
-    # N - Diferença entre saldo bancário e saldo calculado
-    df["N"] = (df["F"].astype(float) - df["M"]).fillna(0.0)
+    # L) Saldo Final Ajustado (I+J-K)
+    df["Saldo Final Ajustado"] = df["Saldo Anterior"] + df["Diferença a Pagar"] - df["Diferença a Receber"]
 
-    # O - Status
-    df["O"] = df["N"].apply(lambda v: "Conciliado" if abs(float(v)) < 0.01 else "Pendente")
+    # M) Saldo Próxima Reunião (G+L-H)
+    df["Saldo Próxima Reunião"] = df["Aprovado Reunião"] + df["Saldo Final Ajustado"] - df["Valor Fatura"]
+
+    # O) Saldo Final do Mês (G+L-N)
+    df["Saldo Final do Mês"] = df["Aprovado Reunião"] + df["Saldo Final Ajustado"] - df["Pós-Fechamento"]
 
     return df
 
 
-def obter_saldo_anterior(periodo_atual: str) -> float:
-    """Recupera o saldo final do período anterior para carry-over."""
+def periodo_anterior(mes: str, ano: int) -> str | None:
+    idx = MESES.index(mes)
+    if idx == 0 and ano == ANOS[0]:
+        return None
+    if idx == 0:
+        return periodo_chave(MESES[-1], ano - 1)
+    return periodo_chave(MESES[idx - 1], ano)
+
+
+def periodo_seguinte(mes: str, ano: int) -> str | None:
+    idx = MESES.index(mes)
+    if idx == len(MESES) - 1 and ano == ANOS[-1]:
+        return None
+    if idx == len(MESES) - 1:
+        return periodo_chave(MESES[0], ano + 1)
+    return periodo_chave(MESES[idx + 1], ano)
+
+
+def carry_over(mes: str, ano: int) -> None:
+    """Copia a coluna O do período atual para a coluna I do próximo período,
+    preservando os dados cadastrais (A-F)."""
+    chave_atual = periodo_chave(mes, ano)
+    chave_prox = periodo_seguinte(mes, ano)
+    if chave_prox is None:
+        st.warning("Não há próximo período disponível para carry over.")
+        return
+
+    df_atual = st.session_state.periodos.get(chave_atual, criar_dataframe_vazio())
+    if df_atual.empty:
+        st.warning("Período atual está vazio. Nada para carry over.")
+        return
+
+    df_prox = st.session_state.periodos.get(chave_prox, criar_dataframe_vazio()).copy()
+
+    # Base cadastral A-F do período atual
+    base = df_atual[["Cartão", "Resumo 7 dígitos", "Titular", "CPF", "Localidade", "Limite"]].copy()
+    base["Saldo Anterior"] = pd.to_numeric(df_atual["Saldo Final do Mês"], errors="coerce").fillna(0.0).astype(float)
+
+    # Demais colunas zeradas
+    for col in ["Aprovado Reunião", "Valor Fatura", "Diferença a Pagar",
+                "Diferença a Receber", "Saldo Final Ajustado", "Saldo Próxima Reunião",
+                "Pós-Fechamento", "Saldo Final do Mês"]:
+        base[col] = 0.0
+
+    base = base[COLUNAS]
+    st.session_state.periodos[chave_prox] = base.reset_index(drop=True)
+    st.success(f"Carry over realizado para {chave_prox}.")
+
+
+def exportar_excel(df: pd.DataFrame) -> bytes:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Conciliação")
+    return buf.getvalue()
+
+
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
+st.sidebar.title("🏦 Conciliação Bradesco")
+
+st.sidebar.subheader("Período")
+mes_sel = st.sidebar.selectbox("Mês", MESES, index=0)
+ano_sel = st.sidebar.selectbox("Ano", ANOS, index=ANOS.index(2024))
+chave_atual = periodo_chave(mes_sel, ano_sel)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Apelidos de Colunas")
+with st.sidebar.expander("Renomear colunas exibidas", expanded=False):
+    for col in COLUNAS:
+        novo = st.text_input(f"{col}", value=st.session_state.apelidos.get(col, col), key=f"apelido_{col}")
+        st.session_state.apelidos[col] = novo or col
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Ações")
+acao_carry = st.sidebar.button("⏭️ Carry over para próximo período")
+if acao_carry:
+    carry_over(mes_sel, ano_sel)
+    st.rerun()
+
+# -----------------------------------------------------------------------------
+# Importação de dados
+# -----------------------------------------------------------------------------
+st.subheader(f"Período: {mes_sel} / {ano_sel}")
+
+col_imp1, col_imp2 = st.columns([2, 1])
+with col_imp1:
+    arquivo = st.file_uploader("Importar Excel/CSV", type=["xlsx", "xls", "csv"], key=f"uploader_{chave_atual}")
+with col_imp2:
+    st.write("")
+    st.write("")
+    btn_importar = st.button("📥 Importar dados")
+
+if btn_importar and arquivo is not None:
     try:
-        mes, ano = periodo_atual.split("/")
-        mes = int(mes)
-        ano = int(ano)
-        mes_ant = mes - 1
-        ano_ant = ano
-        if mes_ant == 0:
-            mes_ant = 12
-            ano_ant = ano - 1
-        periodo_ant = f"{mes_ant:02d}/{ano_ant}"
-        df_ant = st.session_state.periodos.get(periodo_ant)
-        if df_ant is not None and not df_ant.empty:
-            return float(df_ant["M"].iloc[-1])
-    except Exception:
-        pass
-    return 0.0
+        if arquivo.name.lower().endswith(".csv"):
+            df_import = pd.read_csv(arquivo)
+        else:
+            df_import = pd.read_excel(arquivo)
 
+        df_norm = normalizar_dataframe_importado(df_import)
+        df_norm = recalcular(df_norm)
 
-def mapear_arquivo(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Mapeia colunas do arquivo importado para a estrutura A-O.
-
-    Aceita tanto os apelidos quanto as letras A-O como cabeçalho.
-    """
-    mapa_inverso = {v.lower(): k for k, v in APELIDOS.items()}
-    mapa_inverso.update({k.lower(): k for k in COLUNAS})
-
-    novas_colunas = {}
-    for col in df_raw.columns:
-        chave = str(col).strip().lower()
-        if chave in mapa_inverso:
-            novas_colunas[col] = mapa_inverso[chave]
-
-    df = df_raw.rename(columns=novas_colunas)
-
-    # Manter apenas colunas reconhecidas; demais são descartadas
-    df = df[[c for c in COLUNAS if c in df.columns]]
-
-    return normalizar_dataframe(df)
-
-
-# -----------------------------------------------------------------------------
-# Cabeçalho
-# -----------------------------------------------------------------------------
-st.title("Bradesco Conciliação")
-
-# -----------------------------------------------------------------------------
-# Seletor de Mês/Ano
-# -----------------------------------------------------------------------------
-col_mes, col_ano, col_novo = st.columns([1, 1, 1])
-
-with col_mes:
-    mes_sel = st.selectbox(
-        "Mês",
-        options=[f"{m:02d}" for m in range(1, 13)],
-        index=0,
-        key="sel_mes",
-    )
-
-with col_ano:
-    ano_sel = st.selectbox(
-        "Ano",
-        options=[str(a) for a in range(2020, 2031)],
-        index=4,
-        key="sel_ano",
-    )
-
-with col_novo:
-    st.write("")
-    st.write("")
-    if st.button("Abrir / Criar Período"):
-        periodo = f"{mes_sel}/{ano_sel}"
-        garantir_periodo(periodo)
-        st.session_state.periodo_atual = periodo
+        # FIX DO BUG: salvar explicitamente no período atual e forçar rerun
+        st.session_state.periodos[chave_atual] = df_norm
+        st.success(f"Importação concluída: {len(df_norm)} linha(s) carregada(s) para {chave_atual}.")
         st.rerun()
-
-periodo = st.session_state.periodo_atual
-
-if not periodo:
-    st.info("Selecione um Mês/Ano e clique em 'Abrir / Criar Período' para começar.")
-    st.stop()
-
-garantir_periodo(periodo)
-
-st.subheader(f"Período: {periodo}")
+    except Exception as e:
+        st.error(f"Erro ao importar arquivo: {e}")
+elif btn_importar and arquivo is None:
+    st.warning("Selecione um arquivo antes de importar.")
 
 # -----------------------------------------------------------------------------
-# Upload de arquivo (Excel/CSV)
+# Editor de dados
 # -----------------------------------------------------------------------------
-with st.expander("Importar arquivo (Excel/CSV)", expanded=False):
-    arquivo = st.file_uploader(
-        "Selecione um arquivo .xlsx ou .csv",
-        type=["xlsx", "xls", "csv"],
-        key=f"uploader_{periodo}",
-    )
+df_atual = obter_periodo_atual(mes_sel, ano_sel)
 
-    if arquivo is not None:
-        try:
-            if arquivo.name.lower().endswith(".csv"):
-                df_raw = pd.read_csv(arquivo, dtype=str)
-            else:
-                df_raw = pd.read_excel(arquivo, dtype=str)
+# FIX StreamlitAPIException: cast explícito + fill 0.0
+df_editor = df_atual.copy()
+for col in COLUNAS_NUMERICAS:
+    df_editor[col] = pd.to_numeric(df_editor[col], errors="coerce").fillna(0.0).astype(float)
 
-            df_mapeado = mapear_arquivo(df_raw)
-            saldo_ant = obter_saldo_anterior(periodo)
-            df_processado = calcular_colunas(df_mapeado, saldo_anterior)
+# Apelidos para exibição
+df_display = df_editor.rename(columns=st.session_state.apelidos)
 
-            # FIX 1: armazenar corretamente no período atual
-            st.session_state.periodos[periodo] = df_processado
+st.write(f"**Registros no período:** {len(df_display)}")
 
-            # FIX 2: garantir que o data_editor usará o valor atualizado
-            st.session_state.periodo_atual = periodo
-
-            st.success(
-                f"Importação concluída com sucesso! "
-                f"{len(df_processado)} registro(s) carregado(s) para {periodo}."
-            )
-
-            # FIX 6: rerun para atualizar a UI e exibir os novos dados
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Erro ao importar o arquivo: {e}")
-
-# -----------------------------------------------------------------------------
-# Data Editor
-# -----------------------------------------------------------------------------
-df_atual = st.session_state.periodos.get(periodo, criar_dataframe_vazio())
-df_atual = normalizar_dataframe(df_atual)
-
-# Apelidos para exibição no data_editor
-df_exibicao = df_atual.rename(columns=APELIDOS)
-
-st.markdown("### Lançamentos")
-
-config_colunas = {}
-for letra, apelido in APELIDOS.items():
-    if letra in COLUNAS_NUMERICAS:
-        config_colunas[apelido] = st.column_config.NumberColumn(format="%.2f")
-    elif letra == "G":
-        config_colunas[apelido] = st.column_config.CheckboxColumn(default=False)
-    elif letra == "A":
-        config_colunas[apelido] = st.column_config.TextColumn(help="Data do lançamento")
-    else:
-        config_colunas[apelido] = st.column_config.TextColumn()
-
-df_editado = st.data_editor(
-    df_exibicao,
+edited = st.data_editor(
+    df_display,
     num_rows="dynamic",
     use_container_width=True,
-    column_config=config_colunas,
-    key=f"editor_{periodo}",
-    hide_index=True,
+    key=f"editor_{chave_atual}",
+    column_config={
+        st.session_state.apelidos.get(c, c): st.column_config.NumberColumn(format="%.2f")
+        for c in COLUNAS_NUMERICAS
+    },
 )
 
-# -----------------------------------------------------------------------------
-# Persistir edições do data_editor de volta no session_state
-# -----------------------------------------------------------------------------
-if df_editado is not None:
-    # Reverter apelidos -> letras
-    apelido_para_letra = {v: k for k, v in APELIDOS.items()}
-    df_revertido = df_editado.rename(columns=apelido_para_letra)
-    df_revertido = normalizar_dataframe(df_revertido)
+# Reverter apelidos -> nomes reais e salvar no session_state
+mapa_reverso = {v: k for k, v in st.session_state.apelidos.items()}
+df_salvar = edited.rename(columns=mapa_reverso)
 
-    saldo_ant = obter_saldo_anterior(periodo)
-    df_recalculado = calcular_colunas(df_revertido, saldo_ant)
+# Garantir colunas numéricas
+for col in COLUNAS_NUMERICAS:
+    if col in df_salvar.columns:
+        df_salvar[col] = pd.to_numeric(df_salvar[col], errors="coerce").fillna(0.0).astype(float)
 
-    st.session_state.periodos[periodo] = df_recalculado
+# Recalcular lógica
+df_salvar = recalcular(df_salvar)
 
-# -----------------------------------------------------------------------------
-# Resumo do período
-# -----------------------------------------------------------------------------
-st.markdown("### Resumo")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Saldo Anterior (J)", f"{df_atual['J'].iloc[-1] if not df_atual.empty else 0.0:.2f}")
-c2.metric("Entradas (K)", f"{df_atual['K'].iloc[-1] if not df_atual.empty else 0.0:.2f}")
-c3.metric("Saídas (L)", f"{df_atual['L'].iloc[-1] if not df_atual.empty else 0.0:.2f}")
-c4.metric("Saldo Atual (M)", f"{df_atual['M'].iloc[-1] if not df_atual.empty else 0.0:.2f}")
+st.session_state.periodos[chave_atual] = df_salvar
 
 # -----------------------------------------------------------------------------
 # Exportação
 # -----------------------------------------------------------------------------
-st.markdown("### Exportar")
-col_exp_csv, col_exp_xlsx = st.columns(2)
+st.divider()
+col_exp1, col_exp2 = st.columns([1, 3])
+with col_exp1:
+    btn_exportar = st.button("📤 Exportar Excel")
+if btn_exportar:
+    dados = exportar_excel(df_salvar)
+    st.download_button(
+        label="⬇️ Baixar arquivo",
+        data=dados,
+        file_name=f"conciliacao_{chave_atual}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-with col_exp_csv:
-    if st.button("Exportar CSV"):
-        df_export = df_atual.rename(columns=APELIDOS)
-        st.download_button(
-            label="Baixar CSV",
-            data=df_export.to_csv(index=False).encode("utf-8"),
-            file_name=f"conciliacao_bradesco_{periodo.replace('/', '-')}.csv",
-            mime="text/csv",
-        )
-
-with col_exp_xlsx:
-    if st.button("Exportar Excel"):
-        df_export = df_atual.rename(columns=APELIDOS)
-        st.download_button(
-            label="Baixar XLSX",
-            data=df_export.to_excel(index=False),
-            file_name=f"conciliacao_bradesco_{periodo.replace('/', '-')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+# -----------------------------------------------------------------------------
+# Informação de carry over
+# -----------------------------------------------------------------------------
+chave_ant = periodo_anterior(mes_sel, ano_sel)
+if chave_ant and chave_ant in st.session_state.periodos:
+    df_ant = st.session_state.periodos[chave_ant]
+    if not df_ant.empty:
+        st.info(f"📌 Período anterior ({chave_ant}) possui {len(df_ant)} registro(s). "
+                f"Use 'Carry over' no período anterior para trazer o Saldo Final do Mês para o Saldo Anterior deste período.")
