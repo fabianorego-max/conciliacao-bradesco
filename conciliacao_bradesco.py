@@ -22,7 +22,6 @@ Estrutura de colunas (A até O):
 import streamlit as st
 import pandas as pd
 import numpy as np
-import unicodedata
 from io import BytesIO
 
 # -----------------------------------------------------------------------------
@@ -72,6 +71,15 @@ MESES = [
 ANOS = list(range(2020, 2031))
 
 # -----------------------------------------------------------------------------
+# Mapeamento explícito de sinônimos comuns para colunas cadastrais
+# -----------------------------------------------------------------------------
+SINONIMOS = {
+    "Cartão": ["cartao", "numero", "n_cartao", "card", "numero_cartao"],
+    "Titular": ["titular", "nome", "cliente", "nome_cliente", "owner"],
+    "CPF": ["cpf", "documento", "doc"],
+}
+
+# -----------------------------------------------------------------------------
 # Inicialização do session_state
 # -----------------------------------------------------------------------------
 if "periodos" not in st.session_state:
@@ -99,91 +107,73 @@ def obter_periodo_atual(mes: str, ano: int) -> pd.DataFrame:
     return st.session_state.periodos[chave]
 
 
-def _normalizar_nome_coluna(nome: str) -> str:
-    """Normaliza o nome de uma coluna para comparação resiliente:
-    - lowercase
-    - remove acentos
-    - remove espaços e caracteres especiais
-    """
-    if nome is None:
+def _limpar_cartao(valor) -> str:
+    """Converte o valor de Cartão para string removendo '.0' residual."""
+    if pd.isna(valor):
         return ""
-    s = str(nome).strip().lower()
-    # Remove acentos
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    # Remove espaços e caracteres não alfanuméricos
-    s = "".join(c for c in s if c.isalnum())
-    return s
+    texto = str(valor).strip()
+    # Remove sufixo .0 de conversões automáticas do pandas (ex.: 1234567.0)
+    if texto.endswith(".0"):
+        texto = texto[:-2]
+    return texto
 
 
 def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
     """Garante que o DataFrame importado tenha exatamente as colunas A-O.
 
-    Mapeamento resiliente (case-insensitive, sem espaços, sem acentos)
-    para casar variações de nomes nos arquivos importados.
+    Etapas:
+      1) Mapeia sinônimos comuns (Cartão, Titular, CPF) e apelidos configurados.
+      2) Garante todas as colunas A-O.
+      3) Converte Cartão para string removendo '.0' residual.
+      4) Extrai os 7 dígitos (Coluna B) imediatamente após normalizar a Coluna A.
+      5) Trata conversão numérica individualmente para as colunas J-O.
     """
     df = df_import.copy()
 
-    # Constrói mapa de apelidos e nomes canônicos usando a mesma normalização
-    mapa = {}
-    for k, v in st.session_state.apelidos.items():
-        mapa[_normalizar_nome_coluna(v)] = k
-    for k in COLUNAS:
-        mapa[_normalizar_nome_coluna(k)] = k
+    # --- Mapeamento flexível: apelidos configurados + nomes canônicos ---
+    mapa = {v.lower(): k for k, v in st.session_state.apelidos.items()}
+    mapa.update({k.lower(): k for k in COLUNAS})
 
-    # Mapeamento flexível: tenta casar nomes/apelidos normalizados
+    # --- Mapeamento explícito de sinônimos comuns ---
+    for col_canonica, sinonimos in SINONIMOS.items():
+        for sin in sinonimos:
+            mapa[sin.lower()] = col_canonica
+
     novas_colunas = {}
-    colunas_encontradas = []
-    colunas_nao_reconhecidas = []
-
     for col in df.columns:
-        chave_norm = _normalizar_nome_coluna(col)
-        if chave_norm in mapa:
-            novas_colunas[col] = mapa[chave_norm]
-            colunas_encontradas.append(f"'{col}' -> '{mapa[chave_norm]}'")
-        else:
-            colunas_nao_reconhecidas.append(str(col))
-
-    # Logs de depuração para diagnóstico do usuário
-    st.info(f"📋 Colunas no arquivo original: {list(df.columns)}")
-    if colunas_encontradas:
-        st.info(f"✅ Colunas reconhecidas e mapeadas:\n" + "\n".join(f"  - {c}" for c in colunas_encontradas))
-    if colunas_nao_reconhecidas:
-        st.warning(f"⚠️ Colunas NÃO reconhecidas (serão ignoradas): {colunas_nao_reconhecidas}")
+        chave = str(col).strip().lower()
+        if chave in mapa:
+            novas_colunas[col] = mapa[chave]
 
     if novas_colunas:
         df = df.rename(columns=novas_colunas)
 
-    # Garante que 'Cartão' seja string (evita float/notação científica)
-    if "Cartão" in df.columns:
-        df["Cartão"] = df["Cartão"].astype(str).str.strip()
-        # Remove sufixos .0 caso pandas tenha convertido para float antes
-        df["Cartão"] = df["Cartão"].str.replace(r"\.0$", "", regex=True)
-        # Remove caracteres não numéricos para padronizar
-        df["Cartão"] = df["Cartão"].str.replace(r"\D", "", regex=True)
-    else:
-        df["Cartão"] = ""
-
-    # Garante todas as colunas A-O
+    # --- Garante todas as colunas A-O ---
     for col in COLUNAS:
         if col not in df.columns:
             df[col] = np.nan
 
     df = df[COLUNAS]
 
-    # Cast numérico + fill 0.0
+    # --- Conversão individual de tipos ---
+    # Coluna A (Cartão): string sem '.0' residual
+    df["Cartão"] = df["Cartão"].apply(_limpar_cartao)
+
+    # Coluna B (Resumo 7 dígitos): extração imediata a partir de Cartão
+    df["Resumo 7 dígitos"] = (
+        df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
+    )
+
+    # Colunas C (Titular) e D (CPF): string
+    df["Titular"] = df["Titular"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    df["CPF"] = df["CPF"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+
+    # Coluna E (Localidade): string
+    df["Localidade"] = df["Localidade"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+
+    # Colunas numéricas (F, G-O): cast numérico + fill 0.0
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
-
-    # Resumo 7 dígitos automático a partir de Cartão (recalculado imediatamente)
-    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
-
-    # Log de depuração: amostra dos dados cadastrais normalizados
-    if not df.empty:
-        st.info(f"🔍 Amostra após normalização (primeiras 3 linhas):\n"
-                f"  Cartão: {df['Cartão'].head(3).tolist()}\n"
-                f"  Resumo 7 dígitos: {df['Resumo 7 dígitos'].head(3).tolist()}\n"
-                f"  Titular: {df['Titular'].head(3).tolist()}")
 
     return df.reset_index(drop=True)
 
@@ -316,15 +306,18 @@ with col_imp2:
 
 if btn_importar and arquivo is not None:
     try:
+        # Leitura bruta sem dtype=str global para evitar conflitos em formatos mistos.
+        # A conversão de tipos é tratada individualmente em normalizar_dataframe_importado.
         if arquivo.name.lower().endswith(".csv"):
-            # Força 'Cartão' como string na leitura para evitar float/notação científica
-            # Lê tudo como string inicialmente; normalizar_dataframe_importado fará casts numéricos depois
-            df_import = pd.read_csv(arquivo, dtype=str)
+            df_import = pd.read_csv(arquivo)
         else:
-            # Para Excel, lê tudo como string para preservar Cartão como texto
-            df_import = pd.read_excel(arquivo, dtype=str)
+            df_import = pd.read_excel(arquivo)
 
-        st.info(f"📄 Arquivo lido com {len(df_import)} linha(s) e {len(df_import.columns)} coluna(s).")
+        # Tabela temporária: mostra exatamente como o pandas está lendo as colunas
+        # originais antes de qualquer processamento.
+        st.write("### 📋 Pré-visualização bruta (como o pandas leu o arquivo)")
+        st.dataframe(df_import.head(20), use_container_width=True)
+        st.write(f"Colunas detectadas: {list(df_import.columns)}")
 
         df_norm = normalizar_dataframe_importado(df_import)
         df_norm = recalcular(df_norm)
