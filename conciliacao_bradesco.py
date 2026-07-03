@@ -22,6 +22,7 @@ Estrutura de colunas (A até O):
 import streamlit as st
 import pandas as pd
 import numpy as np
+import unicodedata
 from io import BytesIO
 
 # -----------------------------------------------------------------------------
@@ -70,15 +71,20 @@ MESES = [
 
 ANOS = list(range(2020, 2031))
 
-# -----------------------------------------------------------------------------
-# Mapeamento de sinônimos para colunas cadastrais
-# -----------------------------------------------------------------------------
+# Sinônimos para mapeamento resiliente de colunas na importação
 SINONIMOS = {
-    "Cartão": ["cartao", "cartão", "numero", "número", "n_cartao", "n_cartão",
-               "card", "numero_cartao", "número_cartao", "n_do_cartao", "n_do_cartão"],
-    "Titular": ["titular", "nome", "cliente", "nome_cliente", "owner",
-                "nome_do_titular"],
-    "CPF": ["cpf", "documento", "doc", "cpf_cnpj"],
+    "Cartão": [
+        "cartao", "cartão", "numero", "número", "n_cartao", "n_cartão",
+        "card", "numero_cartao", "número_cartao", "n_do_cartao",
+        "n_do_cartão", "n_cart", "num_cartao"
+    ],
+    "Titular": [
+        "titular", "nome", "cliente", "nome_cliente", "owner",
+        "nome_do_titular", "nome_completo", "razao_social"
+    ],
+    "CPF": [
+        "cpf", "documento", "doc", "cpf_cnpj", "cnpj"
+    ],
 }
 
 # -----------------------------------------------------------------------------
@@ -109,49 +115,118 @@ def obter_periodo_atual(mes: str, ano: int) -> pd.DataFrame:
     return st.session_state.periodos[chave]
 
 
-def _normalizar_cartao(valor) -> str:
-    """Converte o valor de Cartão para string, removendo sufixo '.0' de floats."""
-    if valor is None:
+def _normalizar_texto(texto: str) -> str:
+    """Normaliza texto para comparação resiliente: lowercase, sem acentos, sem espaços/underscores."""
+    if texto is None:
         return ""
-    if isinstance(valor, float) and not np.isnan(valor):
-        # Inteiro lido como float -> remove o '.0'
-        if float(valor).is_integer():
-            return str(int(valor))
-        return str(valor)
-    if isinstance(valor, (int, np.integer)):
-        return str(int(valor))
-    texto = str(valor).strip()
-    # Remove sufixo '.0' caso exista (ex.: '12345.0' -> '12345')
-    if texto.endswith(".0"):
-        texto = texto[:-2]
+    texto = str(texto).strip().lower()
+    # Remove acentos
+    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
+    # Remove espaços e underscores
+    texto = texto.replace(" ", "").replace("_", "")
     return texto
+
+
+def _construir_mapa_colunas() -> dict:
+    """Constrói mapa de mapeamento de nomes de colunas (apelidos + oficiais + sinônimos)."""
+    mapa = {}
+    # Apelidos configurados pelo usuário
+    for k, v in st.session_state.apelidos.items():
+        mapa[_normalizar_texto(v)] = k
+    # Nomes oficiais
+    for k in COLUNAS:
+        mapa[_normalizar_texto(k)] = k
+    # Sinônimos
+    for col_alvo, sinonimos in SINONIMOS.items():
+        for sin in sinonimos:
+            mapa[_normalizar_texto(sin)] = col_alvo
+    return mapa
 
 
 def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
     """Garante que o DataFrame importado tenha exatamente as colunas A-O."""
     df = df_import.copy()
 
-    # Visualização de depuração: colunas encontradas no arquivo original
-    st.write("### 🔍 Colunas encontradas no arquivo original")
-    st.write(list(df.columns))
+    mapa = _construir_mapa_colunas()
 
-    # Mapeamento flexível: tenta casar nomes/apelidos
-    mapa = {v.lower(): k for k, v in st.session_state.apelidos.items()}
-    mapa.update({k.lower(): k for k in COLUNAS})
-
-    # Adiciona mapeamento de sinônimos mais abrangente
-    for col_alvo, sinonimos in SINONIMOS.items():
-        for sin in sinonimos:
-            mapa[sin.lower()] = col_alvo
-
+    # Tenta mapear por nome
     novas_colunas = {}
+    mapeamento_debug = []
     for col in df.columns:
-        chave = str(col).strip().lower()
+        chave = _normalizar_texto(col)
         if chave in mapa:
             novas_colunas[col] = mapa[chave]
+            mapeamento_debug.append({
+                "Coluna no Arquivo": col,
+                "Mapeada para Coluna do Sistema": mapa[chave]
+            })
 
     if novas_colunas:
         df = df.rename(columns=novas_colunas)
+
+    # Detecção por conteúdo: Cartão (longas sequências numéricas)
+    if "Cartão" not in df.columns:
+        candidatos = []
+        for col in df.columns:
+            if col in COLUNAS:
+                continue
+            serie = df[col].dropna().astype(str)
+            if serie.empty:
+                continue
+            digitos = serie.str.replace(r"\D", "", regex=True).str.len()
+            score = (digitos >= 4).mean()
+            if score > 0.5:
+                candidatos.append((col, score))
+        if candidatos:
+            candidatos.sort(key=lambda x: x[1], reverse=True)
+            col_escolhida = candidatos[0][0]
+            df = df.rename(columns={col_escolhida: "Cartão"})
+            mapeamento_debug.append({
+                "Coluna no Arquivo": col_escolhida,
+                "Mapeada para Coluna do Sistema": "Cartão (por conteúdo)"
+            })
+
+    # Detecção por conteúdo: Titular (colunas de texto que não sejam Localidade)
+    if "Titular" not in df.columns:
+        candidatos = []
+        for col in df.columns:
+            if col in COLUNAS or col == "Localidade":
+                continue
+            serie = df[col].dropna().astype(str)
+            if serie.empty:
+                continue
+            digitos = serie.str.replace(r"\D", "", regex=True).str.len()
+            score = (digitos < 4).mean()
+            if score > 0.5:
+                candidatos.append((col, score))
+        if candidatos:
+            candidatos.sort(key=lambda x: x[1], reverse=True)
+            col_escolhida = candidatos[0][0]
+            df = df.rename(columns={col_escolhida: "Titular"})
+            mapeamento_debug.append({
+                "Coluna no Arquivo": col_escolhida,
+                "Mapeada para Coluna do Sistema": "Titular (por conteúdo)"
+            })
+
+    # Interface de depuração: tabela comparativa
+    if mapeamento_debug:
+        st.write("### Mapeamento de colunas detectado")
+        st.write(pd.DataFrame(mapeamento_debug))
+    else:
+        st.info("Nenhuma coluna foi mapeada automaticamente por nome.")
+
+    # Avisos para colunas essenciais não encontradas
+    colunas_lidas = list(df_import.columns)
+    if "Cartão" not in df.columns:
+        st.warning(
+            f"⚠️ Coluna essencial 'Cartão' não encontrada. "
+            f"Colunas lidas no arquivo: {colunas_lidas}"
+        )
+    if "Titular" not in df.columns:
+        st.warning(
+            f"⚠️ Coluna essencial 'Titular' não encontrada. "
+            f"Colunas lidas no arquivo: {colunas_lidas}"
+        )
 
     # Garante todas as colunas A-O
     for col in COLUNAS:
@@ -160,14 +235,16 @@ def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
 
     df = df[COLUNAS]
 
-    # Cast numérico + fill 0.0 (tratamento individual por coluna)
+    # Cast numérico + fill 0.0
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # Força a coluna 'Cartão' a ser string e remove sufixo '.0'
-    df["Cartão"] = df["Cartão"].apply(_normalizar_cartao)
+    # Limpeza da coluna Cartão: forçar string e remover sufixo '.0'
+    df["Cartão"] = df["Cartão"].astype(str)
+    df["Cartão"] = df["Cartão"].str.replace(r"\.0$", "", regex=True)
+    df["Cartão"] = df["Cartão"].replace({"nan": "", "None": ""})
 
-    # Recalcula 'Resumo 7 dígitos' IMEDIATAMENTE após normalizar 'Cartão'
+    # Resumo 7 dígitos automático a partir de Cartão (IMEDIATAMENTE após normalizar Cartão)
     df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
     return df.reset_index(drop=True)
@@ -301,7 +378,6 @@ with col_imp2:
 
 if btn_importar and arquivo is not None:
     try:
-        # Leitura SEM dtype=str global; conversão tratada por coluna na normalização
         if arquivo.name.lower().endswith(".csv"):
             df_import = pd.read_csv(arquivo)
         else:
