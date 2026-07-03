@@ -19,187 +19,225 @@ Estrutura de colunas (A até O):
   N) Pós-Fechamento    - Entrada manual
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
-import streamlit as st
 import pandas as pd
-import numpy as np
-from datetime import datetime
+import streamlit as st
+from streamlit.components.v1 import html
 
-# Configuração da Página
-st.set_page_config(page_title="Conciliação Bradesco", layout="wide")
 
-# --- INICIALIZAÇÃO DO ESTADO ---
-if "dados" not in st.session_state:
-    st.session_state.dados = {}  # Armazena DataFrames por 'YYYY-MM'
-if "apelidos" not in st.session_state:
-    st.session_state.apelidos = {
-        "A": "Cartão", "B": "Resumo (7 dígitos)", "C": "Titular", 
-        "D": "CPF", "E": "Localidade", "F": "Limite", 
-        "G": "Aprovado Reunião", "H": "Valor Fatura", "I": "Saldo Anterior",
-        "J": "Diferença a Pagar", "K": "Diferença a Receber", "L": "Saldo Final Ajustado",
-        "M": "Saldo Próxima Reunião", "N": "Pós-Fechamento", "O": "Saldo Final do Mês"
-    }
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+EXPECTED_COLUMNS = [
+    "Data",
+    "Documento",
+    "Historico",
+    "Entrada (I)",
+    "Saida (O)",
+    "Saldo",
+]
 
-# --- FUNÇÕES DE APOIO ---
-def calcular_colunas(df):
-    """Aplica as fórmulas lógicas do sistema nas colunas A-O"""
-    df = df.copy()
-    # Garantir que colunas numéricas sejam tratadas corretamente
-    cols_numericas = ["F", "G", "H", "I", "J", "K", "L", "M", "N", "O"]
-    for col in cols_numericas:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    
-    # B: Últimos 7 dígitos do cartão (Dado cadastral automático)
-    if "A" in df.columns:
-        df["B"] = df["A"].astype(str).apply(lambda x: x[-7:] if len(x) >= 7 else x)
-    
-    # J: Diferença a Pagar (se H > G => J = H - G, senão 0)
-    df["J"] = np.where(df["H"] > df["G"], df["H"] - df["G"], 0.0)
-    
-    # K: Diferença a Receber (se H < G => K = G - H, senão 0)
-    df["K"] = np.where(df["H"] < df["G"], df["G"] - df["H"], 0.0)
-    
-    # L: Saldo Final Ajustado (I + J - K)
-    df["L"] = df["I"] + df["J"] - df["K"]
-    
-    # M: Saldo Próxima Reunião (G + L - H)
-    df["M"] = df["G"] + df["L"] - df["H"]
-    
-    # O: Saldo Final do Mês (G + L - N)
-    df["O"] = df["G"] + df["L"] - df["N"]
-    
+NUMERIC_COLUMNS = ["Entrada (I)", "Saida (O)", "Saldo"]
+STRING_COLUMNS = ["Data", "Documento", "Historico"]
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the DataFrame has the expected columns in the expected order."""
+    missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
+    if missing:
+        st.error(f"Planilha sem colunas obrigatórias: {', '.join(missing)}")
+        st.stop()
+
+    df = df[EXPECTED_COLUMNS].copy()
     return df
 
-# --- INTERFACE ---
-st.title("🏦 Sistema de Conciliação Bradesco")
 
-with st.sidebar:
-    st.header("📅 Período de Trabalho")
-    ano = st.selectbox("Ano", range(2024, 2031), index=2)
-    meses_lista = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
-    mes = st.selectbox("Mês", meses_lista, index=datetime.now().month - 1)
-    periodo_atual = f"{ano}-{mes}"
-    
-    st.divider()
-    
-    # --- MELHORIA 1: IMPORTAÇÃO DE PLANILHA PADRÃO ---
-    st.header("📥 Importar Dados")
-    arquivo_upload = st.file_uploader("Carregar planilha inicial (.xlsx ou .csv)", type=["xlsx", "csv"])
-    
-    if arquivo_upload is not None:
-        if st.button("Confirmar Importação"):
-            try:
-                if arquivo_upload.name.endswith('.csv'):
-                    df_importado = pd.read_csv(arquivo_upload)
-                else:
-                    df_importado = pd.read_excel(arquivo_upload)
-                
-                # Garantir que o DF importado tenha as colunas necessárias (A-O)
-                # Se a planilha vier apenas com dados cadastrais (A-F), preenchemos o resto
-                for letra in "ABCDEFGHIJKLMNO":
-                    if letra not in df_importado.columns:
-                        df_importado[letra] = 0.0
-                
-                st.session_state.dados[periodo_atual] = calcular_colunas(df_importado[list("ABCDEFGHIJKLMNO")])
-                st.success("Dados importados com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao importar: {e}")
+def cast_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cast every column to the exact type expected by st.data_editor.
 
-    st.divider()
-    st.header("🏷️ Personalizar Colunas")
-    with st.expander("Editar Nomes das Colunas"):
-        for letra in "ABCDEFGHIJKLMNO":
-            st.session_state.apelidos[letra] = st.text_input(f"Coluna {letra}", st.session_state.apelidos[letra], key=f"label_{letra}")
+    This is the core fix for StreamlitAPIException: numeric columns must be
+    real floats (not object/str) and text columns must be real strings.
+    Empty/blank values are converted to 0.0 for numerics and "" for strings,
+    so the editor never receives mixed types.
+    """
+    df = df.copy()
 
-# Inicializar DataFrame do mês se não existir
-if periodo_atual not in st.session_state.dados:
-    st.session_state.dados[periodo_atual] = pd.DataFrame(columns=list("ABCDEFGHIJKLMNO"))
+    for col in NUMERIC_COLUMNS:
+        if col in df.columns:
+            # Coerce to numeric, turn non-numeric/blank into NaN, then fill with 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-df_mes = st.session_state.dados[periodo_atual]
+    for col in STRING_COLUMNS:
+        if col in df.columns:
+            # Convert everything to string, treat NaN/None as empty string
+            df[col] = df[col].astype(object).where(df[col].notna(), "")
+            df[col] = df[col].astype(str).str.strip()
 
-# Configuração do Editor
-st.subheader(f"Lançamentos: {mes} / {ano}")
+    return df
 
-column_config = {
-    "A": st.column_config.TextColumn(st.session_state.apelidos["A"]),
-    "B": st.column_config.TextColumn(st.session_state.apelidos["B"], disabled=True),
-    "C": st.column_config.TextColumn(st.session_state.apelidos["C"]),
-    "D": st.column_config.TextColumn(st.session_state.apelidos["D"]),
-    "E": st.column_config.TextColumn(st.session_state.apelidos["E"]),
-    "F": st.column_config.NumberColumn(st.session_state.apelidos["F"], format="R$ %.2f"),
-    "G": st.column_config.NumberColumn(st.session_state.apelidos["G"], format="R$ %.2f"),
-    "H": st.column_config.NumberColumn(st.session_state.apelidos["H"], format="R$ %.2f"),
-    "I": st.column_config.NumberColumn(st.session_state.apelidos["I"], format="R$ %.2f"), # Saldo Anterior
-    "J": st.column_config.NumberColumn(st.session_state.apelidos["J"], format="R$ %.2f", disabled=True),
-    "K": st.column_config.NumberColumn(st.session_state.apelidos["K"], format="R$ %.2f", disabled=True),
-    "L": st.column_config.NumberColumn(st.session_state.apelidos["L"], format="R$ %.2f", disabled=True),
-    "M": st.column_config.NumberColumn(st.session_state.apelidos["M"], format="R$ %.2f", disabled=True),
-    "N": st.column_config.NumberColumn(st.session_state.apelidos["N"], format="R$ %.2f"),
-    "O": st.column_config.NumberColumn(st.session_state.apelidos["O"], format="R$ %.2f", disabled=True),
-}
 
-df_editado = st.data_editor(
-    df_mes,
-    column_config=column_config,
-    num_rows="dynamic",
-    use_container_width=True,
-    hide_index=True,
-    key=f"editor_{periodo_atual}"
+def calculate_saldo(df: pd.DataFrame, initial_balance: float = 0.0) -> pd.DataFrame:
+    """
+    Automatic calculation of the running Saldo.
+    Saldo = previous Saldo + Entrada (I) - Saida (O)
+    """
+    df = df.copy()
+    running = float(initial_balance)
+    saldos = []
+    for _, row in df.iterrows():
+        entrada = float(row["Entrada (I)"] or 0.0)
+        saida = float(row["Saida (O)"] or 0.0)
+        running = running + entrada - saida
+        saldos.append(round(running, 2))
+    df["Saldo"] = saldos
+    return df
+
+
+def carry_over_balance(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Balance carry-over (O -> I):
+    If a row has a value in 'Saida (O)' and the next row has no 'Entrada (I)',
+    carry the previous 'Saida (O)' into the next row's 'Entrada (I)'.
+    """
+    df = df.copy().reset_index(drop=True)
+    for i in range(1, len(df)):
+        prev_saida = float(df.loc[i - 1, "Saida (O)"] or 0.0)
+        curr_entrada = float(df.loc[i, "Entrada (I)"] or 0.0)
+        if prev_saida != 0.0 and curr_entrada == 0.0:
+            df.loc[i, "Entrada (I)"] = prev_saida
+    return df
+
+
+def build_column_config():
+    """Build a st.column_config that matches the casted DataFrame types."""
+    return {
+        "Data": st.column_config.TextColumn("Data", help="Data do lançamento"),
+        "Documento": st.column_config.TextColumn("Documento", help="Número do documento"),
+        "Historico": st.column_config.TextColumn("Histórico", help="Descrição do lançamento"),
+        "Entrada (I)": st.column_config.NumberColumn(
+            "Entrada (I)",
+            help="Valor de entrada",
+            format="%.2f",
+            step=0.01,
+        ),
+        "Saida (O)": st.column_config.NumberColumn(
+            "Saída (O)",
+            help="Valor de saída",
+            format="%.2f",
+            step=0.01,
+        ),
+        "Saldo": st.column_config.NumberColumn(
+            "Saldo",
+            help="Saldo calculado automaticamente",
+            format="%.2f",
+            step=0.01,
+            disabled=True,
+        ),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Streamlit UI
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Bradesco Conciliação", layout="wide")
+st.title("Bradesco Conciliação")
+st.caption(
+    "Importe uma planilha padrão, edite os lançamentos e o sistema recalcula "
+    "automaticamente o saldo e o carry-over (O -> I)."
 )
 
-# Botões de Ação
-col_btn1, col_btn2 = st.columns([1, 5])
+# Upload
+uploaded_file = st.file_uploader(
+    "Importar planilha padrão (xlsx, xls, csv)",
+    type=["xlsx", "xls", "csv"],
+)
 
-with col_btn1:
-    if st.button("💾 Salvar e Calcular"):
-        df_calculado = calcular_colunas(df_editado)
-        st.session_state.dados[periodo_atual] = df_calculado
-        st.success("Dados salvos!")
-        st.rerun()
+if "df" not in st.session_state:
+    st.session_state["df"] = pd.DataFrame(columns=EXPECTED_COLUMNS)
 
-# --- MELHORIA 2: TRANSPORTE DE SALDO (O -> I) ---
-with st.sidebar:
-    st.divider()
-    if st.button("🔒 Fechar Mês e Transportar Saldo"):
-        # 1. Salvar mês atual primeiro
-        df_atual_finalizado = calcular_colunas(df_editado)
-        st.session_state.dados[periodo_atual] = df_atual_finalizado
-        
-        # 2. Calcular qual é o próximo mês
-        idx_atual = meses_lista.index(mes)
-        if idx_atual == 11: # Dezembro
-            prox_periodo = f"{ano+1}-{meses_lista[0]}"
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.lower().endswith(".csv"):
+            raw = pd.read_csv(uploaded_file)
         else:
-            prox_periodo = f"{ano}-{meses_lista[idx_atual+1]}"
-        
-        # 3. Preparar DataFrame do próximo mês
-        # Pegamos os dados cadastrais (A-F) do mês atual para o próximo
-        df_proximo = df_atual_finalizado[["A", "B", "C", "D", "E", "F"]].copy()
-        
-        # O pulo do gato: Coluna I do próximo recebe Coluna O do atual
-        df_proximo["I"] = df_atual_finalizado["O"]
-        
-        # Inicializar as outras colunas de entrada manual como zero
-        for col in ["G", "H", "N"]:
-            df_proximo[col] = 0.0
-            
-        # Calcular as fórmulas para o próximo mês (J, K, L, M, O)
-        df_proximo = calcular_colunas(df_proximo)
-        
-        # Salvar no estado
-        st.session_state.dados[prox_periodo] = df_proximo
-        
-        st.sidebar.success(f"Mês fechado! Saldo transportado para {prox_periodo}")
-        st.info(f"Mude o seletor de período para '{prox_periodo}' para ver os dados transportados.")
+            raw = pd.read_excel(uploaded_file)
 
-# Resumo Financeiro
-if not st.session_state.dados[periodo_atual].empty:
-    st.divider()
-    st.subheader("📊 Resumo Consolidado")
-    df_res = st.session_state.dados[periodo_atual]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Reunião (G)", f"R$ {df_res['G'].sum():,.2f}")
-    c2.metric("Total Faturas (H)", f"R$ {df_res['H'].sum():,.2f}")
-    c3.metric("Saldo Anterior (I)", f"R$ {df_res['I'].sum():,.2f}")
-    c4.metric("Saldo Final (O)", f"R$ {df_res['O'].sum():,.2f}")
+        raw = normalize_columns(raw)
+        raw = cast_columns(raw)
+        raw = carry_over_balance(raw)
+        raw = calculate_saldo(raw, initial_balance=0.0)
+        st.session_state["df"] = raw
+        st.success("Planilha importada e processada com sucesso.")
+    except Exception as exc:
+        st.error(f"Erro ao importar a planilha: {exc}")
+
+# Toolbar
+col1, col2, col3 = st.columns([1, 1, 2])
+with col1:
+    if st.button("Adicionar linha"):
+        new_row = {c: "" for c in EXPECTED_COLUMNS}
+        new_row["Entrada (I)"] = 0.0
+        new_row["Saida (O)"] = 0.0
+        new_row["Saldo"] = 0.0
+        st.session_state["df"] = pd.concat(
+            [st.session_state["df"], pd.DataFrame([new_row])],
+            ignore_index=True,
+        )
+with col2:
+    if st.button("Recalcular"):
+        st.session_state["df"] = cast_columns(st.session_state["df"])
+        st.session_state["df"] = carry_over_balance(st.session_state["df"])
+        st.session_state["df"] = calculate_saldo(st.session_state["df"], initial_balance=0.0)
+        st.success("Cálculos atualizados.")
+
+# -----------------------------------------------------------------------------
+# Data Editor
+# -----------------------------------------------------------------------------
+# CRITICAL FIX: always cast before rendering so column types match
+# the column_config exactly. This prevents StreamlitAPIException caused
+# by object/str values in numeric columns.
+editor_df = cast_columns(st.session_state["df"])
+
+edited = st.data_editor(
+    editor_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config=build_column_config(),
+    key="bradesco_data_editor",
+)
+
+# Persist edits and keep Saldo in sync
+st.session_state["df"] = cast_columns(edited)
+
+# Recalculate Saldo automatically after edits
+recalculated = calculate_saldo(st.session_state["df"], initial_balance=0.0)
+if not recalculated.equals(st.session_state["df"]):
+    st.session_state["df"] = recalculated
+    st.rerun()
+
+# Summary
+st.subheader("Resumo")
+total_entrada = float(st.session_state["df"]["Entrada (I)"].sum())
+total_saida = float(st.session_state["df"]["Saida (O)"].sum())
+saldo_final = float(st.session_state["df"]["Saldo"].iloc[-1]) if len(st.session_state["df"]) else 0.0
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Total Entradas (I)", f"R$ {total_entrada:,.2f}")
+m2.metric("Total Saídas (O)", f"R$ {total_saida:,.2f}")
+m3.metric("Saldo Final", f"R$ {saldo_final:,.2f}")
+
+# Export
+st.subheader("Exportar")
+export_name = st.text_input("Nome do arquivo", value="conciliacao_bradesco.xlsx")
+if st.button("Baixar planilha"):
+    out = cast_columns(st.session_state["df"])
+    out = calculate_saldo(out, initial_balance=0.0)
+    st.download_button(
+        label="Baixar .xlsx",
+        data=out.to_excel(index=False),
+        file_name=export_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
