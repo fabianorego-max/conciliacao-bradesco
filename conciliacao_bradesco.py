@@ -460,3 +460,29 @@ if chave_ant and chave_ant in st.session_state.periodos:
     if not df_ant.empty:
         st.info(f"📌 Período anterior ({chave_ant}) possui {len(df_ant)} registro(s). "
                 f"Use 'Carry over' no período anterior para trazer o Saldo Final do Mês para o Saldo Anterior deste período.")
+      # 1. Exibe o editor e captura o retorno
+edited_df = st.data_editor(
+    df_display,
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"editor_{chave_atual}"
+)
+
+# 2. Verifica se houve mudança e salva IMEDIATAMENTE
+if not edited_df.equals(df_display):
+    # Reverte apelidos para nomes reais
+    mapa_reverso = {v: k for k, v in st.session_state.apelidos.items()}
+    df_salvar = edited_df.rename(columns=mapa_reverso)
+    
+    # Garante que os números sejam lidos corretamente
+    for col in COLUNAS_NUMERICAS:
+        df_salvar[col] = pd.to_numeric(df_salvar[col], errors="coerce").fillna(0.0)
+    
+    # Primeiro salva o dado digitado (como o Limite)
+    st.session_state.periodos[chave_atual] = df_salvar
+    
+    # Depois recalcula as fórmulas (J até O) com base no novo dado
+    st.session_state.periodos[chave_atual] = recalcular(st.session_state.periodos[chave_atual])
+    
+    # Força a tela a atualizar para mostrar o resultado
+    st.rerun()
