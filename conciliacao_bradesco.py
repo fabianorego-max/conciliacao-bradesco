@@ -19,30 +19,10 @@ Estrutura de colunas (A até O):
   N) Pós-Fechamento    - Entrada manual
   O) Saldo Final do Mês - Fórmula: G + L - N
 """
-# -*- coding: utf-8 -*-
-"""
-Sistema Web de Conciliação de Cartões Bradesco (Streamlit)
-
-Estrutura de colunas (A até O):
-  A) Cartão            - Dado cadastral
-  B) Resumo 7 dígitos  - Dado cadastral (auto a partir de A)
-  C) Titular           - Dado cadastral
-  D) CPF               - Dado cadastral
-  E) Localidade        - Dado cadastral
-  F) Limite            - Dado cadastral
-  G) Aprovado Reunião  - Entrada manual
-  H) Valor Fatura      - Entrada manual
-  I) Saldo Anterior    - Recebe valor da Coluna O do mês anterior
-  J) Diferença a Pagar - Lógica: se H > G => J = H - G, senão J = 0
-  K) Diferença a Receber - Lógica: se H < G => K = G - H, senão K = 0
-  L) Saldo Final Ajustado - Fórmula: I + J - K
-  M) Saldo Próxima Reunião - Fórmula: G + L - H
-  N) Pós-Fechamento    - Entrada manual
-  O) Saldo Final do Mês - Fórmula: G + L - N
-"""
 import streamlit as st
 import pandas as pd
 import numpy as np
+import unicodedata
 from io import BytesIO
 
 # -----------------------------------------------------------------------------
@@ -84,14 +64,6 @@ COLUNAS_NUMERICAS = [
     "Saldo Final do Mês",
 ]
 
-COLUNAS_TEXTO = [
-    "Cartão",
-    "Resumo 7 dígitos",
-    "Titular",
-    "CPF",
-    "Localidade",
-]
-
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
@@ -117,8 +89,6 @@ def criar_dataframe_vazio() -> pd.DataFrame:
     df = pd.DataFrame(columns=COLUNAS)
     for col in COLUNAS_NUMERICAS:
         df[col] = df[col].astype(float)
-    for col in COLUNAS_TEXTO:
-        df[col] = df[col].astype(str)
     return df
 
 
@@ -129,46 +99,70 @@ def obter_periodo_atual(mes: str, ano: int) -> pd.DataFrame:
     return st.session_state.periodos[chave]
 
 
-def extrair_7_digitos(serie: pd.Series) -> pd.Series:
-    """Extrai os últimos 7 dígitos numéricos de uma série (coluna Cartão).
-
-    - Converte cada valor para string.
-    - Remove todos os caracteres não numéricos.
-    - Retorna os últimos 7 dígitos.
-    - Trata NaN/None/empty de forma robusta (retorna string vazia).
+def _normalizar_nome_coluna(nome: str) -> str:
+    """Normaliza o nome de uma coluna para comparação resiliente:
+    - lowercase
+    - remove acentos
+    - remove espaços e caracteres especiais
     """
-    def _extrair(valor):
-        if valor is None:
-            return ""
-        if isinstance(valor, float) and np.isnan(valor):
-            return ""
-        texto = str(valor).strip()
-        if texto.lower() in ("nan", "none", ""):
-            return ""
-        apenas_digitos = "".join(ch for ch in texto if ch.isdigit())
-        if not apenas_digitos:
-            return ""
-        return apenas_digitos[-7:]
-
-    return serie.apply(_extrair)
+    if nome is None:
+        return ""
+    s = str(nome).strip().lower()
+    # Remove acentos
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # Remove espaços e caracteres não alfanuméricos
+    s = "".join(c for c in s if c.isalnum())
+    return s
 
 
 def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
-    """Garante que o DataFrame importado tenha exatamente as colunas A-O."""
+    """Garante que o DataFrame importado tenha exatamente as colunas A-O.
+
+    Mapeamento resiliente (case-insensitive, sem espaços, sem acentos)
+    para casar variações de nomes nos arquivos importados.
+    """
     df = df_import.copy()
 
-    # Mapeamento flexível: tenta casar nomes/apelidos
-    mapa = {v.lower(): k for k, v in st.session_state.apelidos.items()}
-    mapa.update({k.lower(): k for k in COLUNAS})
+    # Constrói mapa de apelidos e nomes canônicos usando a mesma normalização
+    mapa = {}
+    for k, v in st.session_state.apelidos.items():
+        mapa[_normalizar_nome_coluna(v)] = k
+    for k in COLUNAS:
+        mapa[_normalizar_nome_coluna(k)] = k
 
+    # Mapeamento flexível: tenta casar nomes/apelidos normalizados
     novas_colunas = {}
+    colunas_encontradas = []
+    colunas_nao_reconhecidas = []
+
     for col in df.columns:
-        chave = str(col).strip().lower()
-        if chave in mapa:
-            novas_colunas[col] = mapa[chave]
+        chave_norm = _normalizar_nome_coluna(col)
+        if chave_norm in mapa:
+            novas_colunas[col] = mapa[chave_norm]
+            colunas_encontradas.append(f"'{col}' -> '{mapa[chave_norm]}'")
+        else:
+            colunas_nao_reconhecidas.append(str(col))
+
+    # Logs de depuração para diagnóstico do usuário
+    st.info(f"📋 Colunas no arquivo original: {list(df.columns)}")
+    if colunas_encontradas:
+        st.info(f"✅ Colunas reconhecidas e mapeadas:\n" + "\n".join(f"  - {c}" for c in colunas_encontradas))
+    if colunas_nao_reconhecidas:
+        st.warning(f"⚠️ Colunas NÃO reconhecidas (serão ignoradas): {colunas_nao_reconhecidas}")
 
     if novas_colunas:
         df = df.rename(columns=novas_colunas)
+
+    # Garante que 'Cartão' seja string (evita float/notação científica)
+    if "Cartão" in df.columns:
+        df["Cartão"] = df["Cartão"].astype(str).str.strip()
+        # Remove sufixos .0 caso pandas tenha convertido para float antes
+        df["Cartão"] = df["Cartão"].str.replace(r"\.0$", "", regex=True)
+        # Remove caracteres não numéricos para padronizar
+        df["Cartão"] = df["Cartão"].str.replace(r"\D", "", regex=True)
+    else:
+        df["Cartão"] = ""
 
     # Garante todas as colunas A-O
     for col in COLUNAS:
@@ -181,31 +175,29 @@ def normalizar_dataframe_importado(df_import: pd.DataFrame) -> pd.DataFrame:
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # Garante que colunas de texto sejam string (evita float em Cartão/Titular)
-    for col in COLUNAS_TEXTO:
-        if col == "Resumo 7 dígitos":
-            continue  # será calculado abaixo
-        df[col] = df[col].apply(lambda x: "" if (x is None or (isinstance(x, float) and np.isnan(x))) else str(x).strip())
+    # Resumo 7 dígitos automático a partir de Cartão (recalculado imediatamente)
+    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
-    # Resumo 7 dígitos automático a partir de Cartão (robusto)
-    df["Resumo 7 dígitos"] = extrair_7_digitos(df["Cartão"])
+    # Log de depuração: amostra dos dados cadastrais normalizados
+    if not df.empty:
+        st.info(f"🔍 Amostra após normalização (primeiras 3 linhas):\n"
+                f"  Cartão: {df['Cartão'].head(3).tolist()}\n"
+                f"  Resumo 7 dígitos: {df['Resumo 7 dígitos'].head(3).tolist()}\n"
+                f"  Titular: {df['Titular'].head(3).tolist()}")
 
     return df.reset_index(drop=True)
 
 
 def recalcular(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica a lógica de cálculo das colunas B e J-O."""
+    """Aplica a lógica de cálculo das colunas J-O."""
     df = df.copy()
 
     # Garante tipos numéricos
     for col in COLUNAS_NUMERICAS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-    # Garante que Cartão seja string (digitação manual no editor pode trazer float)
-    df["Cartão"] = df["Cartão"].apply(lambda x: "" if (x is None or (isinstance(x, float) and np.isnan(x))) else str(x).strip())
-
-    # B) Resumo 7 dígitos automático (robusto)
-    df["Resumo 7 dígitos"] = extrair_7_digitos(df["Cartão"])
+    # Resumo 7 dígitos automático
+    df["Resumo 7 dígitos"] = df["Cartão"].astype(str).str.replace(r"\D", "", regex=True).str[-7:]
 
     # J) Diferença a Pagar (H>G)
     df["Diferença a Pagar"] = np.where(df["Valor Fatura"] > df["Aprovado Reunião"],
@@ -258,6 +250,8 @@ def carry_over(mes: str, ano: int) -> None:
     if df_atual.empty:
         st.warning("Período atual está vazio. Nada para carry over.")
         return
+
+    df_prox = st.session_state.periodos.get(chave_prox, criar_dataframe_vazio()).copy()
 
     # Base cadastral A-F do período atual
     base = df_atual[["Cartão", "Resumo 7 dígitos", "Titular", "CPF", "Localidade", "Limite"]].copy()
@@ -323,14 +317,19 @@ with col_imp2:
 if btn_importar and arquivo is not None:
     try:
         if arquivo.name.lower().endswith(".csv"):
-            df_import = pd.read_csv(arquivo, dtype={"Cartão": str, "Titular": str, "CPF": str})
+            # Força 'Cartão' como string na leitura para evitar float/notação científica
+            # Lê tudo como string inicialmente; normalizar_dataframe_importado fará casts numéricos depois
+            df_import = pd.read_csv(arquivo, dtype=str)
         else:
-            df_import = pd.read_excel(arquivo, dtype={"Cartão": str, "Titular": str, "CPF": str})
+            # Para Excel, lê tudo como string para preservar Cartão como texto
+            df_import = pd.read_excel(arquivo, dtype=str)
+
+        st.info(f"📄 Arquivo lido com {len(df_import)} linha(s) e {len(df_import.columns)} coluna(s).")
 
         df_norm = normalizar_dataframe_importado(df_import)
         df_norm = recalcular(df_norm)
 
-        # Salvar explicitamente no período atual e forçar rerun
+        # FIX DO BUG: salvar explicitamente no período atual e forçar rerun
         st.session_state.periodos[chave_atual] = df_norm
         st.success(f"Importação concluída: {len(df_norm)} linha(s) carregada(s) para {chave_atual}.")
         st.rerun()
@@ -344,13 +343,10 @@ elif btn_importar and arquivo is None:
 # -----------------------------------------------------------------------------
 df_atual = obter_periodo_atual(mes_sel, ano_sel)
 
-# Cast explícito + fill 0.0 para numéricas
+# FIX StreamlitAPIException: cast explícito + fill 0.0
 df_editor = df_atual.copy()
 for col in COLUNAS_NUMERICAS:
     df_editor[col] = pd.to_numeric(df_editor[col], errors="coerce").fillna(0.0).astype(float)
-
-# Garante que Cartão seja string para permitir digitação manual sem perda
-df_editor["Cartão"] = df_editor["Cartão"].apply(lambda x: "" if (x is None or (isinstance(x, float) and np.isnan(x))) else str(x).strip())
 
 # Apelidos para exibição
 df_display = df_editor.rename(columns=st.session_state.apelidos)
@@ -377,7 +373,7 @@ for col in COLUNAS_NUMERICAS:
     if col in df_salvar.columns:
         df_salvar[col] = pd.to_numeric(df_salvar[col], errors="coerce").fillna(0.0).astype(float)
 
-# Recalcular lógica (inclui reextração dos 7 dígitos a partir de Cartão)
+# Recalcular lógica
 df_salvar = recalcular(df_salvar)
 
 st.session_state.periodos[chave_atual] = df_salvar
