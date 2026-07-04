@@ -468,21 +468,42 @@ edited_df = st.data_editor(
     key=f"editor_{chave_atual}"
 )
 
-# 2. Verifica se houve mudança e salva IMEDIATAMENTE
+# --- NOVO BLOCO DO EDITOR (Substitua o antigo por este) ---
+df_atual = obter_periodo_atual(mes_sel, ano_sel)
+df_editor = df_atual.copy()
+
+# Garante que as colunas numéricas sejam float antes de exibir
+for col in COLUNAS_NUMERICAS:
+    df_editor[col] = pd.to_numeric(df_editor[col], errors="coerce").fillna(0.0).astype(float)
+
+# Aplica os apelidos para a visualização na tabela
+df_display = df_editor.rename(columns=st.session_state.apelidos)
+
+st.write(f"**Registros no período:** {len(df_display)}")
+
+# O segredo: usamos uma chave única e capturamos a mudança
+edited_df = st.data_editor(
+    df_display,
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"editor_final_{chave_atual}", # Chave estável
+    column_config={
+        st.session_state.apelidos.get(c, c): st.column_config.NumberColumn(format="%.2f")
+        for c in COLUNAS_NUMERICAS
+    },
+)
+
+# Lógica de salvamento: só roda se houver mudança real
 if not edited_df.equals(df_display):
-    # Reverte apelidos para nomes reais
+    # 1. Reverte os apelidos para os nomes originais das colunas
     mapa_reverso = {v: k for k, v in st.session_state.apelidos.items()}
     df_salvar = edited_df.rename(columns=mapa_reverso)
     
-    # Garante que os números sejam lidos corretamente
-    for col in COLUNAS_NUMERICAS:
-        df_salvar[col] = pd.to_numeric(df_salvar[col], errors="coerce").fillna(0.0)
-    
-    # Primeiro salva o dado digitado (como o Limite)
+    # 2. Salva o dado bruto digitado (isso impede que o Limite suma)
     st.session_state.periodos[chave_atual] = df_salvar
     
-    # Depois recalcula as fórmulas (J até O) com base no novo dado
+    # 3. Agora sim, aplica os cálculos automáticos (J até O)
     st.session_state.periodos[chave_atual] = recalcular(st.session_state.periodos[chave_atual])
     
-    # Força a tela a atualizar para mostrar o resultado
+    # 4. Força o Streamlit a recarregar a tela com os novos cálculos
     st.rerun()
